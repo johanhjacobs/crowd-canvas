@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<!-- loading screen: renders immediately before any JS or external resources -->
+<style>html,body{margin:0;background:#000;}#boot{position:fixed;inset:0;background:#000;z-index:999;display:flex;align-items:center;justify-content:center;}</style>
+<title>Crowd Canvas</title>
+<style>
+  :root { --ink: #000; --paper: #fff; --bg: #e8e8e8; --send: #e0512f; }
+  *, *::before, *::after { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; overflow: hidden; touch-action: none; background: var(--bg);
+    font-family: system-ui, -apple-system, 'Helvetica Neue', sans-serif; }
+  body { display: flex; justify-content: center; }
+  main {
+    width: 100%; max-width: 520px; height: 100%;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 8px; gap: 8px;
+  }
+  .card { border: 2px solid var(--ink); display: inline-block; flex-shrink: 0; position: relative; }
+  .canvas-stack { position: relative; display: block; }
+  .canvas-stack canvas { position: absolute; top: 0; left: 0; display: block; }
+  #paper { z-index: 1; }
+  #ref { display: block; }
+  #hint {
+    margin: 6px 0 4px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .1em; color: #ffffff; opacity: .7; text-align: center;
+  }
+  #ghost {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    background-repeat: no-repeat;
+    opacity: 0; pointer-events: none; z-index: 2;
+    transition: opacity 0.35s ease;
+    will-change: opacity;
+  }
+  #draw { z-index: 3; }
+  .buttons { display: flex; gap: 6px; flex-shrink: 0; }
+  .btn {
+    flex: 1; padding: 13px 8px; border: 2px solid var(--ink); border-radius: 0;
+    background: var(--ink); color: #fff; cursor: pointer;
+    font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em;
+  }
+  .btn:active { opacity: .75; }
+  .btn:disabled { opacity: .35; pointer-events: none; }
+  #submitBtn { background: var(--send); border-color: var(--send); }
+  #waiting-screen, #done {
+    position: fixed; inset: 0; background: var(--ink); color: #fff;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 32px; gap: 16px; z-index: 50;
+  }
+  #waiting-screen.show, #done.show { display: flex; }
+  #waiting-screen h2, #done h2 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -.01em; }
+  #waiting-screen p,  #done p  { margin: 0; font-size: 14px; opacity: .6; line-height: 1.6; }
+  #finalLink {
+    display: block; width: min(78vw, 320px); color: #fff; text-decoration: none;
+  }
+  #finalThumb {
+    width: 100%; aspect-ratio: 1 / 1; object-fit: contain; display: block;
+    border: 2px solid rgba(255,255,255,.65); background: #000;
+  }
+  #finalLink span {
+    display: block; margin-top: 8px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .08em; opacity: .75;
+  }
+  #resultFlash {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 4px;
+    color: #fff; opacity: 0; pointer-events: none;
+    transition: opacity 0.15s; z-index: 30; border-radius: inherit;
+  }
+  #resultFlash .rf-icon { font-size: 56px; line-height: 1; }
+  #resultFlash .rf-pct  { font-size: 22px; font-weight: 700; font-family: system-ui, sans-serif; opacity: .92; }
+  #resultFlash .rf-label{ font-size: 12px; font-weight: 800; font-family: system-ui, sans-serif; text-transform: uppercase; letter-spacing: .08em; opacity: .95; }
+  #resultFlash.ok   { background: rgba(34,197,94,0.88); opacity: 1; }
+  #resultFlash.fail { background: rgba(239,68,68,0.88);  opacity: 1; }
+  #retrievingOverlay {
+    position: absolute; inset: 0; z-index: 25; border-radius: inherit;
+    background: rgba(120,120,120,0.72);
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-family: system-ui, sans-serif;
+    font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    pointer-events: none;
+  }
+  #retrievingOverlay.hidden { display: none; }
+  #refCard.dim { opacity: 0.35; }
+  .pulse { width: 12px; height: 12px; border-radius: 50%; background: var(--send);
+    animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:.3;transform:scale(.8)} 50%{opacity:1;transform:scale(1.2)} }
+  #toast {
+    position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%) translateY(8px);
+    background: rgba(0,0,0,0.88); color: #fff;
+    padding: 12px 20px; border-radius: 32px;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 15px; font-weight: 700; letter-spacing: .01em;
+    text-align: center; white-space: nowrap;
+    opacity: 0; transition: opacity .22s, transform .22s; pointer-events: none;
+    box-shadow: 0 4px 20px rgba(0,0,0,.35);
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<div id="boot"></div>
+<main id="main">
+  <div class="card" id="refCard"><canvas id="ref"></canvas></div>
+  <p id="hint">✏️ Copy this image on the canvas below</p>
+  <div class="card" id="drawCard">
+    <div id="resultFlash"></div>
+    <div id="retrievingOverlay">⟳ Retrieving tile…</div>
+    <div class="canvas-stack" id="drawStack">
+      <canvas id="paper"></canvas>
+      <div id="ghost"></div>
+      <canvas id="draw"></canvas>
+    </div>
+  </div>
+  <div class="buttons" id="buttons">
+    <button class="btn" id="clearBtn">Clear</button>
+    <button class="btn" id="nextBtn">New piece</button>
+    <button class="btn" id="submitBtn">Send →</button>
+  </div>
+</main>
+<div id="toast"></div>
+<div id="waiting-screen">
+  <div class="pulse"></div>
+  <h2>Get ready!</h2>
+  <p>The game starts soon.<br>Keep this screen open.</p>
+</div>
+<div id="done">
+  <h2>Thank you!</h2>
+  <p>The final mosaic is ready.<br>Tap it to download the full version.</p>
+  <a id="finalLink" href="/api/final-view.png" download="crowd-canvas.png">
+    <img id="finalThumb" src="/api/final-view-thumb.png" alt="Final mosaic">
+    <span>Download full image</span>
+  </a>
+</div>
+
+<script>
+let INK = '#000000', PAPER = '#ffffff', SEND = '#e0512f';
+let simThreshold = 0.35;
+let maxStrayInk = 1.5;
+let minCoverage = 0.60;
+let similarityRetries = 0; // resets to 0 on each new tile
+let dpr = 1, tileSide = 0, drawSide = 0, bleedPx = 0;
+let tileId = null, drawing = false, pts = [];
+let curRef = null;
+
+const refCard  = document.getElementById('refCard');
+const drawCard = document.getElementById('drawCard');
+const drawStack = document.getElementById('drawStack');
+const refC  = document.getElementById('ref');
+const paperC = document.getElementById('paper');
+const drawC  = document.getElementById('draw');
+const rctx  = refC.getContext('2d');
+const pctx  = paperC.getContext('2d');
+const ctx   = drawC.getContext('2d');
+
+// ── sizing ────────────────────────────────────────────────────────────────────
+function setup() {
+  dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 3));
+  const mainEl  = document.getElementById('main');
+  const btnsEl  = document.getElementById('buttons');
+  const mainH   = mainEl.getBoundingClientRect().height;
+  const mainW   = mainEl.getBoundingClientRect().width;
+  const btnsH   = btnsEl.offsetHeight || 46;
+  const PAD = 8, GAPS = 8 * 3; // 3 gaps (top of ref, between cards, between draw and buttons)
+  const availH  = mainH - btnsH - GAPS - PAD * 2;
+  const availW  = mainW - PAD * 2;
+
+  // constraints: tileSide * 1.2 ≤ availW  AND  tileSide * 2.2 ≤ availH
+  tileSide = Math.floor(Math.min(availW / 1.2, availH / 2.2));
+  drawSide = Math.floor(tileSide * 1.2);
+
+  // ref canvas = tile size
+  setCanvas(refC,   rctx,  tileSide, tileSide);
+  refCard.style.width  = tileSide + 'px';
+  refCard.style.height = tileSide + 'px';
+
+  // draw canvases = draw size (tile + bleed)
+  setCanvas(paperC, pctx, drawSide, drawSide);
+  setCanvas(drawC,  ctx,  drawSide, drawSide);
+  drawStack.style.width  = drawSide + 'px';
+  drawStack.style.height = drawSide + 'px';
+  drawCard.style.width  = drawSide + 'px';
+  drawCard.style.height = drawSide + 'px';
+
+  // buttons match draw card width
+  document.getElementById('buttons').style.width = drawSide + 'px';
+
+  // bleedPx in CSS px — the offset from draw canvas edge to tile zone start
+  bleedPx = (drawSide - tileSide) / 2; // = tileSide * 0.1
+
+  // ghost: sized and positioned to match the inner tile zone exactly (same as ref card)
+  const ghost = document.getElementById('ghost');
+  ghost.style.backgroundSize     = `${tileSide}px ${tileSide}px`;
+  ghost.style.backgroundPosition = `${bleedPx}px ${bleedPx}px`;
+
+  paintPaper();
+  if (curRef) drawRef(curRef);
+}
+
+function setCanvas(c, g, w, h) {
+  c.width  = Math.round(w * dpr);
+  c.height = Math.round(h * dpr);
+  c.style.width  = w + 'px';
+  c.style.height = h + 'px';
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+// ── paper layer: bleed zone + tile zone + tile border ────────────────────────
+function paintPaper() {
+  // whole canvas = bleed zone (gray)
+  pctx.fillStyle = '#b8b8b8';
+  pctx.fillRect(0, 0, drawSide, drawSide);
+  // inner tile zone = paper
+  pctx.fillStyle = PAPER;
+  pctx.fillRect(bleedPx, bleedPx, tileSide, tileSide);
+  // explicit tile boundary
+  pctx.strokeStyle = INK;
+  pctx.lineWidth = 2;
+  pctx.strokeRect(bleedPx, bleedPx, tileSide, tileSide);
+}
+
+function drawRef(img) {
+  rctx.fillStyle = PAPER;
+  rctx.fillRect(0, 0, tileSide, tileSide);
+  rctx.drawImage(img, 0, 0, tileSide, tileSide);
+}
+
+function clearDraw() {
+  ctx.clearRect(0, 0, drawSide, drawSide);
+}
+
+// ── drawing ───────────────────────────────────────────────────────────────────
+const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+function brushW() { return drawSide * (1 / 12) * 0.6; } // ~5mm equiv relative to drawSide
+function pos(e) {
+  const r = drawC.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+function strokeSetup() {
+  ctx.strokeStyle = INK; ctx.fillStyle = INK;
+  ctx.lineWidth = brushW(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+}
+drawC.addEventListener('pointerdown', e => {
+  if (!tileId) return; // no tile yet — ignore
+  e.preventDefault(); drawC.setPointerCapture(e.pointerId);
+  drawing = true; strokeSetup(); const p = pos(e); pts = [p];
+  ctx.beginPath(); ctx.arc(p.x, p.y, brushW() / 2, 0, 7); ctx.fill();
+});
+drawC.addEventListener('pointermove', e => {
+  if (!drawing) return; e.preventDefault();
+  const p = pos(e); pts.push(p);
+  if (pts.length >= 3) {
+    const n = pts.length, p1 = pts[n-2], p2 = pts[n-1];
+    const m1 = mid(pts[n-3], p1), m2 = mid(p1, p2);
+    ctx.beginPath(); ctx.moveTo(m1.x, m1.y); ctx.quadraticCurveTo(p1.x, p1.y, m2.x, m2.y); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); ctx.lineTo(p.x, p.y); ctx.stroke();
+  }
+});
+['pointerup','pointercancel','pointerleave'].forEach(ev =>
+  drawC.addEventListener(ev, () => drawing = false));
+
+// ── submit: crop inner tile zone only ─────────────────────────────────────────
+function buildSubmitCanvas() {
+  const tileDev = Math.round(tileSide * dpr);
+  const flat = document.createElement('canvas');
+  flat.width = tileDev; flat.height = tileDev;
+  const fc = flat.getContext('2d');
+  // compute exact bleed offset in device pixels (symmetric)
+  const bleedDev = Math.floor((paperC.width - tileDev) / 2);
+  fc.fillStyle = PAPER;
+  fc.fillRect(0, 0, tileDev, tileDev);
+  // composite paper inner zone (white bg, no border — start fresh for clean submit)
+  fc.fillStyle = PAPER;
+  fc.fillRect(0, 0, tileDev, tileDev);
+  // user strokes from draw canvas, inner zone only
+  fc.drawImage(drawC, bleedDev, bleedDev, tileDev, tileDev, 0, 0, tileDev, tileDev);
+  return flat;
+}
+
+// ── networking ────────────────────────────────────────────────────────────────
+let ws;
+function dismissBoot() {
+  const b = document.getElementById('boot');
+  if (b) { b.style.transition = 'opacity .3s'; b.style.opacity = '0'; setTimeout(() => b.remove(), 320); }
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws?role=player`);
+  ws.onmessage = ev => {
+    dismissBoot();
+    const m = JSON.parse(ev.data);
+    if (m.type === 'done') {
+      showDone();
+    } else if (m.type === 'resume') {
+      // admin reopened the game — leave the done screen and rejoin (staggered)
+      document.getElementById('done').classList.remove('show');
+      document.getElementById('waiting-screen').classList.remove('show');
+      setTimeout(() => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); }, Math.random() * 2000);
+    } else if (m.type === 'waiting') {
+      document.getElementById('waiting-screen').classList.add('show');
+      // retry every 3s in case the open signal was missed
+      setTimeout(function retry() {
+        if (!document.getElementById('waiting-screen').classList.contains('show')) return;
+        if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
+        setTimeout(retry, 3000);
+      }, 3000);
+    } else if (m.type === 'config') {
+      applyConfig(m);
+    } else if (m.type === 'tile') {
+      similarityRetries = 0; // fresh tile — reset retry counter
+      document.getElementById('waiting-screen').classList.remove('show');
+      tileId = m.tileId; setBusy(false); clearDraw(); ghostClear(); updateTileUI();
+      const img = new Image();
+      img.onload = () => {
+        curRef = img; drawRef(img);
+        document.getElementById('ghost').style.backgroundImage = `url(${img.src})`;
+      };
+      img.src = m.refUrl + '?t=' + Date.now();
+    } else if (m.type === 'wait') {
+      toast('⏳ Looking for your next piece…');
+      setTimeout(() => ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: 'next' })), 2000);
+    } else if (m.type === 'accepted') {
+      toast('✅ Sent — nice work!');
+      setTimeout(() => ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: 'next' })), 900);
+    } else if (m.type === 'rejected') {
+      toast(m.reason === 'stray' ? '✗ Extra marks in empty space!' : '✏️ Draw something first!');
+      setBusy(false);
+    }
+  };
+  ws.onclose = () => setTimeout(connect, 2000);
+  ws.onerror  = () => ws.close();
+}
+
+function showDone() {
+  const t = '?t=' + Date.now();
+  document.getElementById('finalThumb').src = '/api/final-view-thumb.png' + t; // small preview
+  document.getElementById('finalLink').href = '/api/final-view.png' + t;       // full-res download
+  document.getElementById('waiting-screen').classList.remove('show');
+  document.getElementById('done').classList.add('show');
+  tileId = null;
+  updateTileUI();
+}
+
+function applyConfig(cfg) {
+  if (cfg.inkColor)    { INK = cfg.inkColor;  document.documentElement.style.setProperty('--ink', INK); paintPaper(); }
+  if (cfg.paperColor)  { PAPER = cfg.paperColor; document.documentElement.style.setProperty('--paper', PAPER); paintPaper(); }
+  if (cfg.canvasColor) document.documentElement.style.setProperty('--bg', cfg.canvasColor);
+  if (cfg.sendColor)   { SEND = cfg.sendColor; document.documentElement.style.setProperty('--send', SEND); }
+  if (cfg.similarityThreshold !== undefined) simThreshold = cfg.similarityThreshold;
+  if (cfg.maxStrayInk !== undefined) maxStrayInk = cfg.maxStrayInk;
+  if (cfg.minCoverage !== undefined) minCoverage = cfg.minCoverage;
+}
+
+// ── similarity check — multi-scale soft IoU ───────────────────────────────────
+// Score = weighted average of soft IoU at 3 resolutions.
+//   inter = sum(min(ref_dark, draw_dark))  — pixels both images agree have ink
+//   union = sum(max(ref_dark, draw_dark))  — pixels either image has ink
+//   IoU   = inter / union                  — fraction of the ink union that overlaps
+//
+// Extra guardrails:
+//   recall    = how much of the original ink was covered
+//   precision = how much of the player ink belongs on the original
+//   inkRatio  = avoids passing drawings that are much too empty or much too full
+//
+// Multi-scale: 8×8 catches wrong position; 32×32 catches coverage and detail.
+// The final score remains 0-1, so admin's threshold still maps directly to %.
+
+function getSimilarityScore() {
+  if (!curRef || !tileId) return { score: 1, label: 'strong', ok: true, blank: false }; // no ref/tile → nothing to compare
+
+  const SCALES  = [8, 16, 32];
+  const WEIGHTS = [0.20, 0.30, 0.50]; // more weight on finer scales
+
+  const off = Object.assign(document.createElement('canvas'), { width: 1, height: 1 });
+  const oc  = off.getContext('2d');
+  let score = 0, recallScore = 0, precisionScore = 0, inkRatioScore = 0, deepWhiteSpill = 0, drawDarkCells = 0;
+
+  for (let si = 0; si < SCALES.length; si++) {
+    const S = SCALES[si];
+    off.width = S; off.height = S;
+
+    oc.drawImage(refC, 0, 0, S, S);
+    const rd = oc.getImageData(0, 0, S, S).data;
+
+    oc.fillStyle = '#ffffff'; oc.fillRect(0, 0, S, S);
+    oc.drawImage(paperC, bleedPx * dpr, bleedPx * dpr, tileSide * dpr, tileSide * dpr, 0, 0, S, S);
+    oc.drawImage(drawC,  bleedPx * dpr, bleedPx * dpr, tileSide * dpr, tileSide * dpr, 0, 0, S, S);
+    const dd = oc.getImageData(0, 0, S, S).data;
+
+    // per-cell darkness for reference (R) and player drawing (D)
+    const R = new Float64Array(S * S);
+    const D = new Float64Array(S * S);
+    for (let i = 0; i < S * S; i++) {
+      const p = i * 4;
+      R[i] = 1 - (rd[p] + rd[p+1] + rd[p+2]) / (3 * 255); // 0=white 1=black
+      D[i] = 1 - (dd[p] + dd[p+1] + dd[p+2]) / (3 * 255);
+      // mirror the old server blank test: count cells the player actually inked
+      if (S === 32 && D[i] > 0.137) drawDarkCells++; // dD>0.137 ≙ grayscale <220
+    }
+
+    // Brush tolerance: on SPARSE tiles only (little black), dilate the reference by
+    // ~1 brush radius at the fine scale so tracing a thin line with the thick brush
+    // reads as a match instead of "over-painting". Dense tiles are left untouched,
+    // so anti-tag behaviour is unchanged. Recall (coverage) always uses the original
+    // reference, and tags in empty areas stay far from the line → still rejected.
+    let Rd = R;
+    if (S === 32) {
+      let frac = 0; for (let i = 0; i < S * S; i++) frac += R[i];
+      if (frac / (S * S) < 0.12) { // sparse tile
+        Rd = new Float64Array(S * S);
+        for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+          let m = 0;
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= S || ny >= S) continue;
+            const v = R[ny * S + nx]; if (v > m) m = v;
+          }
+          Rd[y * S + x] = m;
+        }
+      }
+    }
+
+    let inter = 0, interTol = 0, unionTol = 0, refInk = 0, refInkDil = 0, drawInk = 0;
+    for (let i = 0; i < S * S; i++) {
+      inter    += Math.min(R[i],  D[i]);   // overlap vs original ref (for coverage)
+      interTol += Math.min(Rd[i], D[i]);   // overlap vs tolerant ref (for shape match)
+      unionTol += Math.max(Rd[i], D[i]);
+      refInk    += R[i];
+      refInkDil += Rd[i];
+      drawInk   += D[i];
+    }
+
+    // blank ref at this scale (both images nearly white) → free pass for this scale
+    if (unionTol < 0.5) {
+      score += WEIGHTS[si];
+      recallScore += WEIGHTS[si];
+      precisionScore += WEIGHTS[si];
+      inkRatioScore += WEIGHTS[si];
+      if (S === 32) deepWhiteSpill = measureDeepWhiteSpill(rd, dd, S);
+      continue;
+    }
+
+    score += WEIGHTS[si] * (interTol / unionTol);
+    recallScore += WEIGHTS[si] * (refInk > 0.5 ? inter / refInk : 1); // coverage: original reference
+    precisionScore += WEIGHTS[si] * (drawInk > 0.5 ? interTol / drawInk : 0);
+
+    const inkRatio = drawInk / Math.max(0.5, refInkDil);
+    inkRatioScore += WEIGHTS[si] * Math.min(1, inkRatio, 1 / inkRatio);
+    if (S === 32) deepWhiteSpill = measureDeepWhiteSpill(rd, dd, S);
+  }
+
+  // Blend overlap with coverage, correctness and ink amount. IoU remains dominant;
+  // the other factors stop scribbles and tiny partial copies from scoring too well.
+  const shapeScore = clamp01(
+    score * 0.58 +
+    recallScore * 0.18 +
+    precisionScore * 0.16 +
+    inkRatioScore * 0.08
+  );
+
+  // Stray marks in deep-white areas are an absolute penalty. This prevents tiny
+  // symbols from being diluted by large legitimate dark regions in the tile.
+  const spillOver = Math.max(0, deepWhiteSpill - maxStrayInk);
+  const cleanliness = maxStrayInk > 0
+    ? clamp01(1 - spillOver / (maxStrayInk * 1.75))
+    : (deepWhiteSpill > 0 ? 0 : 1);
+  const finalScore = clamp01(shapeScore * cleanliness);
+
+  // blank = essentially nothing drawn (same intent as the old server-side check,
+  // <0.5% inked). Enforced regardless of the similarity threshold.
+  const blank = drawDarkCells < 6;
+
+  const result = classifySimilarity(finalScore, {
+    overlap: score,
+    recall: recallScore,
+    precision: precisionScore,
+    inkRatio: inkRatioScore,
+    spill: deepWhiteSpill,
+    shapeScore
+  });
+  result.blank = blank;
+  return result;
+}
+
+function clamp01(v) {
+  return Math.max(0, Math.min(1, v));
+}
+
+function measureDeepWhiteSpill(refData, drawData, size) {
+  const halo = 2;
+  let spill = 0;
+
+  function darkAt(data, x, y) {
+    const p = (y * size + x) * 4;
+    return 1 - (data[p] + data[p+1] + data[p+2]) / (3 * 255);
+  }
+
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      if (darkAt(refData, x, y) > 0.15) continue;
+
+      let nearInk = false;
+      for (let dy = -halo; dy <= halo && !nearInk; dy++) {
+        for (let dx = -halo; dx <= halo; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+          if (darkAt(refData, nx, ny) > 0.25) { nearInk = true; break; }
+        }
+      }
+      if (nearInk) continue;
+
+      spill += darkAt(drawData, x, y);
+    }
+  }
+
+  return spill;
+}
+
+function classifySimilarity(score, details) {
+  // Coverage is a hard floor that applies even when the similarity score is "off":
+  // the player must overlap at least minCoverage of the reference's ink.
+  const coveredEnough = minCoverage <= 0 || details.recall >= minCoverage;
+
+  if (simThreshold === 0) {
+    if (!coveredEnough) return { score, label: 'partial', ok: false, details };
+    return { score, label: 'strong', ok: true, details };
+  }
+
+  const weakLimit = Math.max(0.10, simThreshold * 0.55);
+  const strongLimit = Math.min(0.92, Math.max(simThreshold + 0.22, 0.68));
+  const cleanEnough = details.spill <= maxStrayInk;
+
+  if (!cleanEnough) return { score, label: 'none', ok: false, details };
+  if (!coveredEnough) return { score, label: 'partial', ok: false, details };
+  if (score < weakLimit) return { score, label: 'none', ok: false, details };
+  if (score < simThreshold) return { score, label: 'weak', ok: false, details };
+  if (score >= strongLimit) return { score, label: 'strong', ok: true, details };
+  return { score, label: 'match', ok: true, details };
+}
+
+function similarityLabelText(label) {
+  return ({
+    none: 'No match',
+    partial: 'Cover more',
+    weak: 'Weak match',
+    match: 'Match',
+    strong: 'Strong match'
+  })[label] || 'Match';
+}
+
+// ── ghost opacity helpers ─────────────────────────────────────────────────────
+function setGhostOpacity(v) {
+  document.getElementById('ghost').style.opacity = v;
+}
+function ghostFail() { setGhostOpacity(0.40); }
+
+// hide opacity only — keeps the image (used when retrying the same tile)
+function ghostHide() {
+  const ghost = document.getElementById('ghost');
+  ghost.style.transition = 'none';
+  void ghost.offsetHeight;
+  ghost.style.opacity = 0;
+  requestAnimationFrame(() => { ghost.style.transition = ''; });
+}
+
+// hide + wipe image (used when moving to a new tile)
+function ghostClear() {
+  const ghost = document.getElementById('ghost');
+  ghost.style.transition = 'none';
+  ghost.style.backgroundImage = 'none';
+  void ghost.offsetHeight;
+  ghost.style.opacity = 0;
+  requestAnimationFrame(() => { ghost.style.transition = ''; });
+}
+
+
+function updateTileUI() {
+  const hasTile = !!tileId;
+  document.getElementById('retrievingOverlay').classList.toggle('hidden', hasTile);
+  document.getElementById('refCard').classList.toggle('dim', !hasTile);
+  document.getElementById('clearBtn').disabled = !hasTile;
+  document.getElementById('buttons').style.opacity = hasTile ? '' : '0.4';
+}
+
+function setBusy(b) {
+  document.getElementById('submitBtn').disabled = b;
+  document.getElementById('nextBtn').disabled = b;
+}
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 1600);
+}
+
+document.getElementById('clearBtn').addEventListener('click', clearDraw);
+document.getElementById('nextBtn').addEventListener('click', () => {
+  if (ws && ws.readyState === 1) { tileId = null; updateTileUI(); setBusy(true); ws.send(JSON.stringify({ type: 'next' })); }
+});
+function showResultFlash(result, callback) {
+  const el = document.getElementById('resultFlash');
+  const pct = Math.round(result.score * 100);
+  el.innerHTML = `<span class="rf-icon">${result.ok ? '✓' : '✗'}</span><span class="rf-pct">${pct}%</span><span class="rf-label">${similarityLabelText(result.label)}</span>`;
+  el.className = result.ok ? 'ok' : 'fail';
+  setTimeout(() => { el.className = ''; el.innerHTML = ''; if (callback) callback(); }, 900);
+}
+
+document.getElementById('submitBtn').addEventListener('click', () => {
+  if (!tileId || !ws || ws.readyState !== 1) return;
+  setBusy(true);
+  const result = getSimilarityScore();
+  if (result.blank) { // nothing meaningful drawn — same intent as the old server blank reject
+    toast('✏️ Draw something first!');
+    setBusy(false);
+    return;
+  }
+  showResultFlash(result, () => {
+    if (result.label === 'partial') {
+      // covered too little of the shape — keep their work, nudge them to add more
+      toast('🖌️ Cover more of the shape — keep going!');
+      ghostFail();   // fade the tracing guide in so they can see what's missing
+      setBusy(false);
+      return;
+    }
+    if (!result.ok) {
+      similarityRetries++;
+      if (similarityRetries <= 1) {
+        toast('🔄 Not quite — canvas cleared, try again!');
+        clearDraw();
+        ghostHide();   // snap opacity to 0 but keep the image
+        ghostFail();   // fade back in so player can trace it
+        setBusy(false);
+      } else {
+        toast('🎨 Getting you a new piece…');
+        setTimeout(() => {
+          if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
+        }, 1800);
+      }
+      return;
+    }
+    ws.send(JSON.stringify({ type: 'submit', tileId, png: buildSubmitCanvas().toDataURL('image/png') }));
+  });
+});
+
+document.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+window.addEventListener('resize', () => requestAnimationFrame(setup));
+window.addEventListener('load',   () => requestAnimationFrame(() => {
+  setup(); updateTileUI();
+  setTimeout(connect, Math.random() * 3000); // spread 10K simultaneous connects over 3s
+}));
+</script>
+</body>
+</html>

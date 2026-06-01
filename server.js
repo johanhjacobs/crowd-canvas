@@ -1,0 +1,941 @@
+import express from 'express';
+import { WebSocketServer } from 'ws';
+import sharp from 'sharp';
+import Database from 'better-sqlite3';
+import multer from 'multer';
+import http from 'http';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+import { randomUUID } from 'crypto';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '127.0.0.1';
+const DATA = path.join(__dirname, 'data');
+const REFS = path.join(DATA, 'refs');
+const FINAL_VIEW = path.join(DATA, 'final-view.png');
+fs.mkdirSync(REFS, { recursive: true });
+let finalViewPng = null;
+let finalViewThumbPng = null; // downscaled preview for the player done screen
+
+const MIN_TILE = 16; // minimum tile size in pixels
+const MIN_SIZE = 1024; // smallest base resolution (for tiny uploads)
+// SIZE and ANALYZE are computed per-upload in slice() from the actual image dimensions
+
+// next power of 2 ≥ n — ensures quadtree always halves cleanly
+function nextPow2(n) { let p = 1; while (p < n) p <<= 1; return p; }
+
+const db = new Database(path.join(DATA, 'crowd.db'));
+db.pragma('journal_mode = WAL');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, created INTEGER, size INTEGER, redundancy INTEGER DEFAULT 3);
+  CREATE TABLE IF NOT EXISTS tiles(id TEXT PRIMARY KEY, session TEXT, x INTEGER, y INTEGER, sz INTEGER, blank INTEGER DEFAULT 0, fill INTEGER DEFAULT 255);
+  CREATE TABLE IF NOT EXISTS submissions(id TEXT PRIMARY KEY, tile TEXT, png TEXT, created INTEGER);
+  CREATE TABLE IF NOT EXISTS config(key TEXT PRIMARY KEY, value TEXT);
+`);
+try { db.exec('ALTER TABLE tiles ADD COLUMN blank INTEGER DEFAULT 0'); } catch {}
+try { db.exec('ALTER TABLE tiles ADD COLUMN fill INTEGER DEFAULT 255'); } catch {}
+try { db.exec('ALTER TABLE sessions ADD COLUMN redundancy INTEGER DEFAULT 3'); } catch {}
+try { db.exec('ALTER TABLE sessions ADD COLUMN img_w INTEGER DEFAULT 1024'); } catch {}
+try { db.exec('ALTER TABLE sessions ADD COLUMN img_h INTEGER DEFAULT 1024'); } catch {}
+
+// ── config ────────────────────────────────────────────────────────────────────
+const DEFAULT_CONFIG = {
+  inkColor: '#000000',
+  paperColor: '#ffffff',
+  canvasColor: '#f3ede1',
+  blendMode: 'blend',    // 'blend' | 'random' | 'first'
+  blendGamma: 1.71,
+  liveMinPixelVotes: 0,   // live view only: hide pixels drawn by <= this many players
+  sendColor: '#e0512f',
+  similarityThreshold: 0.35, // recall threshold 0=off; 0.25 works well for most images
+  maxStrayInk: 1.5,          // max ink in deep-white reference areas on a 32x32 grid
+  minCoverage: 0.60,         // min fraction of the reference ink the player must cover (0=off)
+  viewBackground: 'black',   // big-screen default background: 'black' | 'white'
+  viewSidebarWidth: 27,      // big-screen sidebar width as a % of screen width
+};
+function getConfig() {
+  const row = db.prepare("SELECT value FROM config WHERE key='main'").get();
+  return row ? { ...DEFAULT_CONFIG, ...JSON.parse(row.value) } : { ...DEFAULT_CONFIG };
+}
+function saveConfig(obj) {
+  db.prepare("INSERT OR REPLACE INTO config(key,value) VALUES('main',?)").run(JSON.stringify(obj));
+}
+
+function invalidateFinalView() {
+  finalViewPng = null;
+  finalViewThumbPng = null;
+  try { fs.rmSync(FINAL_VIEW, { force: true }); } catch {}
+}
+
+// ── in-memory session state ───────────────────────────────────────────────────
+let state = null;
+
+
+
+function loadActive() {
+  const s = db.prepare('SELECT * FROM sessions ORDER BY created DESC LIMIT 1').get();
+  if (!s) { state = null; return; }
+  const tiles = db.prepare('SELECT * FROM tiles WHERE session=?').all(s.id);
+  const map = new Map(), blanks = [];
+  for (const t of tiles) {
+    if (t.blank) blanks.push({ x: t.x, y: t.y, sz: t.sz, fill: t.fill ?? 255 });
+    else map.set(t.id, { ...t, assigned: 0 });
+  }
+  const blendedPngs = new Map(), livePngs = new Map();
+  for (const [id] of map) {
+    blendedPngs.set(id, null);
+    livePngs.set(id, undefined); // undefined = not rendered yet; null = no submissions
+  }
+
+  // rebuild submission counts from DB
+  const submissionCounts = new Map();
+  for (const [id] of map) submissionCounts.set(id, 0);
+  const rows = db.prepare('SELECT tile, COUNT(*) n FROM submissions GROUP BY tile').all();
+  for (const r of rows) if (submissionCounts.has(r.tile)) submissionCounts.set(r.tile, r.n);
+
+  const redundancy = s.redundancy || 3;
+  const done = map.size > 0 && [...submissionCounts.values()].every(n => n >= redundancy);
+  const imgW = s.img_w || 1024;
+  const imgH = s.img_h || 1024;
+
+  // shuffle tile ids once — round-robin through this order so the mosaic
+  // lights up scattered/organic rather than top-left to bottom-right
+  const tileIds = [...map.keys()];
+  for (let i = tileIds.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [tileIds[i], tileIds[j]] = [tileIds[j], tileIds[i]];
+  }
+
+  state = { id: s.id, size: s.size, redundancy, tiles: map, blanks, blendedPngs, livePngs,
+            submissionCounts, done, imgW, imgH,
+            tileIds,       // shuffled order — never changes
+            deckPos: 0,    // round-robin pointer into tileIds
+            activeCount: new Map(), // tileId → how many players currently drawing it
+          };
+}
+loadActive();
+
+// ── slicer ────────────────────────────────────────────────────────────────────
+async function slice(buffer, pieces, redundancy) {
+  // measure original so we can preserve the aspect ratio
+  const { width: origW, height: origH } = await sharp(buffer).metadata();
+
+  // size = next power of 2 ≥ longest edge, minimum MIN_SIZE
+  // powers of 2 ensure the quadtree always halves into clean integer coordinates
+  const size = Math.max(nextPow2(Math.max(origW, origH)), MIN_SIZE);
+  const analyze = size / 4; // analysis buffer; keeps f=0.25 → same per-pixel accuracy at any size
+
+  const scale = size / Math.max(origW, origH);
+  const imgW = Math.min(size, Math.round(origW * scale));
+  const imgH = Math.min(size, Math.round(origH * scale));
+
+  // resize into size×size with content anchored top-left; padding area scores near-zero → blank
+  const base = await sharp(buffer)
+    .flatten({ background: '#ffffff' })
+    .resize(size, size, { fit: 'contain', position: 'left top', background: '#ffffff' })
+    .toFormat('png').toBuffer();
+
+  const { data, info } = await sharp(base)
+    .resize(analyze, analyze, { fit: 'fill' })
+    .grayscale().raw().toBuffer({ resolveWithObject: true });
+  const ch = info.channels;
+  const f = analyze / size;
+
+  function score(c) {
+    const sx = Math.floor(c.x * f), sy = Math.floor(c.y * f);
+    const ss = Math.max(1, Math.round(c.sz * f));
+    let ink = 0, tot = 0;
+    for (let yy = sy; yy < sy + ss && yy < analyze; yy++)
+      for (let xx = sx; xx < sx + ss && xx < analyze; xx++) {
+        tot++; if (data[(yy * analyze + xx) * ch] < 128) ink++;
+      }
+    if (!tot) return 0;
+    const p = ink / tot;
+    return 4 * p * (1 - p) * c.sz;
+  }
+
+  // average darkness: 0 = white, 1 = black (continuous, for fill colour)
+  function avgDark(c) {
+    const sx = Math.floor(c.x * f), sy = Math.floor(c.y * f);
+    const ss = Math.max(1, Math.round(c.sz * f));
+    let sum = 0, tot = 0;
+    for (let yy = sy; yy < sy + ss && yy < analyze; yy++)
+      for (let xx = sx; xx < sx + ss && xx < analyze; xx++) {
+        tot++; sum += 255 - data[(yy * analyze + xx) * ch]; // 0=white, 255=black
+      }
+    return tot ? sum / (tot * 255) : 0;
+  }
+
+  let leaves = [{ x: 0, y: 0, sz: size }];
+  const target = Math.max(1, (pieces | 0) || 64); // no upper cap — limited naturally by image size and MIN_TILE
+  while (leaves.length < target) {
+    let bi = -1, bs = 0;
+    for (let i = 0; i < leaves.length; i++) {
+      if (leaves[i].sz <= MIN_TILE) continue;
+      const s = score(leaves[i]);
+      if (s > bs) { bs = s; bi = i; }
+    }
+    if (bi < 0 || bs <= 0) break;
+    const c = leaves[bi], h = c.sz / 2;
+    leaves.splice(bi, 1,
+      { x: c.x, y: c.y, sz: h }, { x: c.x + h, y: c.y, sz: h },
+      { x: c.x, y: c.y + h, sz: h }, { x: c.x + h, y: c.y + h, sz: h });
+  }
+
+  // tag blanks: rely on the score formula — 4·p·(1-p) ≈ 0 means the tile is
+  // essentially uniform. nearlyUniform threshold was removed; it incorrectly
+  // filtered tiles with thin lines (e.g. 3% dark pixels = valid content).
+  leaves = leaves.map(c => {
+    const dark = avgDark(c);
+    const isBlank = score(c) < 0.01 * c.sz;
+    return { ...c, blank: isBlank ? 1 : 0, fill: Math.round((1 - dark) * 255) };
+  });
+
+  // persist
+  db.exec('DELETE FROM submissions; DELETE FROM tiles; DELETE FROM sessions;');
+  invalidateFinalView();
+  fs.rmSync(REFS, { recursive: true, force: true }); fs.mkdirSync(REFS, { recursive: true });
+  fs.writeFileSync(path.join(DATA, 'base.png'), base); // kept for overlay generation
+
+  const id = randomUUID();
+  db.prepare('INSERT INTO sessions(id,created,size,redundancy,img_w,img_h) VALUES(?,?,?,?,?,?)').run(id, Date.now(), size, (redundancy | 0) || 3, imgW, imgH);
+  const insT = db.prepare('INSERT INTO tiles(id,session,x,y,sz,blank,fill) VALUES(?,?,?,?,?,?,?)');
+
+  for (const c of leaves) {
+    const tid = randomUUID();
+    insT.run(tid, id, c.x, c.y, c.sz, c.blank, c.fill ?? 255);
+    if (!c.blank) {
+      // clamp extract to base image bounds and extend with white if tile crosses edge
+      const maxX = size, maxY = size;
+      const eW = Math.min(c.sz, maxX - c.x);
+      const eH = Math.min(c.sz, maxY - c.y);
+      let ref;
+      if (eW <= 0 || eH <= 0) {
+        ref = await sharp({ create: { width: 256, height: 256, channels: 3, background: '#ffffff' } }).png().toBuffer();
+      } else if (eW < c.sz || eH < c.sz) {
+        ref = await sharp(base)
+          .extract({ left: c.x, top: c.y, width: eW, height: eH })
+          .extend({ top: 0, left: 0, right: c.sz - eW, bottom: c.sz - eH, background: '#ffffff' })
+          .resize(256, 256, { fit: 'fill' }).png().toBuffer();
+      } else {
+        ref = await sharp(base)
+          .extract({ left: c.x, top: c.y, width: c.sz, height: c.sz })
+          .resize(256, 256, { fit: 'fill' }).png().toBuffer();
+      }
+      fs.writeFileSync(path.join(REFS, tid + '.png'), ref);
+    }
+  }
+  loadActive();
+  const nonBlank = leaves.filter(l => !l.blank).length;
+  return { id, tiles: leaves.length, active: nonBlank, blank: leaves.length - nonBlank };
+}
+
+// ── submission processing ─────────────────────────────────────────────────────
+// Blank detection, deep-white stray-ink detection and the similarity score all
+// run on the player's phone now (see player.html → getSimilarityScore). The
+// server no longer re-checks submissions, which removes per-submission image
+// decoding here and the client/server "green tick then rejected" disagreement.
+
+async function blendTile(tileId, opts = {}) {
+  const subs = db.prepare('SELECT png FROM submissions WHERE tile=? ORDER BY created').all(tileId);
+  if (!subs.length) return null;
+  const cfg = getConfig();
+  const liveMinPixelVotes = opts.liveView ? Math.max(0, Math.min(5, cfg.liveMinPixelVotes | 0)) : 0;
+
+  const decode = async (png64) => {
+    const buf = Buffer.from(png64.replace(/^data:[^;]+;base64,/, ''), 'base64');
+    const { data, info } = await sharp(buf)
+      .flatten({ background: '#ffffff' })
+      .grayscale().resize(256, 256, { fit: 'fill' }).raw().toBuffer({ resolveWithObject: true });
+    return { data, ch: info.channels };
+  };
+
+  if (cfg.blendMode === 'first') {
+    return Buffer.from(subs[0].png.replace(/^data:[^;]+;base64,/, ''), 'base64');
+  }
+  if (cfg.blendMode === 'random') {
+    const s = subs[Math.floor(Math.random() * subs.length)];
+    return Buffer.from(s.png.replace(/^data:[^;]+;base64,/, ''), 'base64');
+  }
+
+  // per-pixel blend with gamma curve
+  const N = subs.length, W = 256, H = 256;
+  const acc = new Float32Array(W * H);
+  const votes = liveMinPixelVotes > 0 ? new Uint8Array(W * H) : null;
+  for (const sub of subs) {
+    const { data, ch } = await decode(sub.png);
+    for (let i = 0; i < W * H; i++) {
+      const ink = (255 - data[i * ch]) / 255;
+      acc[i] += ink;
+      if (votes && ink > 0.08) votes[i]++;
+    }
+  }
+  const gamma = cfg.blendGamma || 1.71;
+  const out = Buffer.alloc(W * H);
+  for (let i = 0; i < W * H; i++) {
+    if (votes && votes[i] <= liveMinPixelVotes) {
+      out[i] = 255;
+      continue;
+    }
+    const f = Math.min(1, acc[i] / N);
+    const curved = 1 - Math.pow(1 - f, gamma);
+    out[i] = Math.round((1 - curved) * 255);
+  }
+  return sharp(out, { raw: { width: W, height: H, channels: 1 } }).png().toBuffer();
+}
+
+async function liveTileUpdate(tileId, t, extra = {}) {
+  const live = await getLiveTilePng(tileId);
+  if (!live) return { type: 'tile-cleared', tileId, x: t.x, y: t.y, sz: t.sz, ...extra };
+  return {
+    type: 'tile-update',
+    tileId,
+    x: t.x,
+    y: t.y,
+    sz: t.sz,
+    png: 'data:image/png;base64,' + live.toString('base64'),
+    ...extra
+  };
+}
+
+function livePixelFilterLevel() {
+  return Math.max(0, Math.min(5, getConfig().liveMinPixelVotes | 0));
+}
+
+async function renderLiveTilePng(tileId, adminBlend = null) {
+  if (!state || (state.submissionCounts.get(tileId) || 0) <= 0) return null;
+  if (livePixelFilterLevel() === 0) {
+    const blended = adminBlend || state.blendedPngs.get(tileId);
+    if (blended) return blended;
+  }
+  return blendTile(tileId, { liveView: true });
+}
+
+async function getLiveTilePng(tileId) {
+  if (!state || !state.tiles.has(tileId)) return null;
+  const cached = state.livePngs.get(tileId);
+  if (cached !== undefined) return cached;
+
+  const live = await renderLiveTilePng(tileId);
+  state.livePngs.set(tileId, live);
+  return live;
+}
+
+async function rebuildLivePngs() {
+  if (!state) return;
+  for (const id of state.tiles.keys()) state.livePngs.set(id, undefined);
+  for (const [id] of state.tiles) {
+    if ((state.submissionCounts.get(id) || 0) > 0) await getLiveTilePng(id);
+    await new Promise(r => setImmediate(r));
+  }
+}
+
+async function buildFinalViewImage() {
+  if (!state) return null;
+  const comps = [];
+  for (const b of state.blanks) {
+    const v = (b.fill ?? 255) > 127 ? 255 : 0;
+    const buf = await sharp({ create: { width: b.sz, height: b.sz, channels: 3, background: { r: v, g: v, b: v } } }).png().toBuffer();
+    comps.push({ input: buf, left: b.x, top: b.y });
+  }
+  for (const [id, t] of state.tiles) {
+    const buf = await getLiveTilePng(id);
+    if (!buf) continue;
+    const img = await sharp(buf).resize(t.sz, t.sz, { fit: 'fill' }).toBuffer();
+    comps.push({ input: img, left: t.x, top: t.y });
+  }
+  const { imgW: iW = 1024, imgH: iH = 1024 } = state;
+  const bg = viewBackground === 'white' ? '#ffffff' : '#000000';
+  const base = sharp({ create: { width: iW, height: iH, channels: 3, background: bg } });
+  return comps.length ? base.composite(comps).png().toBuffer() : base.png().toBuffer();
+}
+
+async function ensureFinalViewImage() {
+  if (finalViewPng) return finalViewPng;
+  if (fs.existsSync(FINAL_VIEW)) {
+    finalViewPng = fs.readFileSync(FINAL_VIEW);
+    return finalViewPng;
+  }
+  const out = await buildFinalViewImage();
+  if (!out) return null;
+  fs.writeFileSync(FINAL_VIEW, out);
+  finalViewPng = out;
+  return finalViewPng;
+}
+
+// small preview (≤512px) for the done screen so 20k phones don't each pull the full image
+async function ensureFinalViewThumb() {
+  if (finalViewThumbPng) return finalViewThumbPng;
+  const full = await ensureFinalViewImage();
+  if (!full) return null;
+  finalViewThumbPng = await sharp(full).resize({ width: 512, withoutEnlargement: true }).png().toBuffer();
+  return finalViewThumbPng;
+}
+
+let viewDelay = 0;
+const pendingViewTimers = new Map(); // tileId → setTimeout handle
+
+// schedule a view update: instant if delay=0, otherwise fires after viewDelay seconds.
+// Cancelled if the tile is cleared before the timer fires.
+function scheduleViewUpdate(msg) {
+  if (viewMode === 'paused' || viewMode === 'hold') return;
+  const key = msg.tileId;
+  if (pendingViewTimers.has(key)) clearTimeout(pendingViewTimers.get(key));
+  if (!viewDelay) { broadcastViews(msg); return; }
+  const timer = setTimeout(() => {
+    pendingViewTimers.delete(key);
+    if (viewMode !== 'paused') broadcastViews(msg);
+  }, viewDelay * 1000);
+  pendingViewTimers.set(key, timer);
+}
+
+// ── background reblend ────────────────────────────────────────────────────────
+async function reblendAll() {
+  if (!state) return;
+  for (const [id, t] of state.tiles) {
+    if ((state.submissionCounts.get(id) || 0) < 1) continue;
+    const blended = await blendTile(id);
+    if (!blended) continue;
+    state.blendedPngs.set(id, blended);
+    state.livePngs.set(id, await renderLiveTilePng(id, blended));
+    const png = 'data:image/png;base64,' + blended.toString('base64');
+    broadcastAdmins({ type: 'tile-update', tileId: id, x: t.x, y: t.y, sz: t.sz, png, subs: state.submissionCounts.get(id) || 0 });
+    scheduleViewUpdate(await liveTileUpdate(id, t));
+    await new Promise(r => setImmediate(r));
+  }
+}
+
+
+function assignTile(playerWs) {
+  if (!state || state.done) return null;
+  const { tiles, tileIds, submissionCounts, activeCount, redundancy } = state;
+  const n = tileIds.length;
+
+  // Walk the shuffled deck starting from deckPos.
+  // Skip tiles that are: (a) already at submission cap, or
+  //                      (b) already have redundancy active drawers right now.
+  // This prevents piling 500 people onto tile #1 during a connection storm.
+  for (let i = 0; i < n; i++) {
+    const idx = (state.deckPos + i) % n;
+    const id  = tileIds[idx];
+    const subs   = submissionCounts.get(id) || 0;
+    const active = activeCount.get(id) || 0;
+    if (subs >= redundancy) continue;         // tile already done
+    if (active >= redundancy) continue;       // enough people drawing it right now
+    // found a good tile — advance pointer past it for the next player
+    state.deckPos = (idx + 1) % n;
+    activeCount.set(id, active + 1);
+    return tiles.get(id);
+  }
+
+  // All tiles either done or fully occupied — fall back: pick any incomplete tile
+  // (ignores active cap, so late-game stragglers still get something)
+  for (let i = 0; i < n; i++) {
+    const id = tileIds[(state.deckPos + i) % n];
+    if ((submissionCounts.get(id) || 0) < redundancy) {
+      const active = activeCount.get(id) || 0;
+      activeCount.set(id, active + 1);
+      return tiles.get(id);
+    }
+  }
+
+  return null; // genuinely complete
+}
+
+// ── http ──────────────────────────────────────────────────────────────────────
+const app = express();
+app.use(express.json({ limit: '5mb' }));
+app.use('/refs', express.static(REFS, { maxAge: '1h' }));
+const noCache = (_, res, next) => { res.set('Cache-Control', 'no-store'); next(); };
+app.get('/',                 noCache, (_, res) => res.sendFile(path.join(__dirname, 'public', 'player.html')));
+app.get('/dropveters-admin', noCache, (_, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
+app.get('/dropveters-view',  noCache, (_, res) => res.sendFile(path.join(__dirname, 'public', 'view.html')));
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+app.post('/api/session', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'no image' });
+    const pieces = parseInt(req.body.pieces, 10) || 64;
+    const redundancy = parseInt(req.body.redundancy, 10) || 3;
+    const r = await slice(req.file.buffer, pieces, redundancy);
+    broadcastAdmins({ type: 'reset', ...adminState() });
+    broadcastViews({ type: 'reset', ...viewInitData() });
+    res.json(r);
+  } catch (e) { console.error(e); res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/session/stop', async (_, res) => {
+  if (!state) return res.status(404).json({ error: 'no active session' });
+  try {
+    await finishSession();
+    res.json({ ok: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/session/resume', (_, res) => {
+  if (!state) return res.status(404).json({ error: 'no active session' });
+  resumeSession();
+  res.json({ ok: true });
+});
+
+// /api/overlay.png — original image with tile boundaries drawn on top.
+// Blank tiles: dashed grey border + light grey tint.
+// Active tiles: solid accent-colour border, sized so smallest tiles are still visible.
+// Served at 512×512 so borders render crisply at typical screen sizes.
+app.get('/api/overlay.png', async (_, res) => {
+  try {
+    const basePath = path.join(DATA, 'base.png');
+    if (!state || !fs.existsSync(basePath)) return res.status(404).end();
+    const OV = 512;
+    const imgW = state.imgW || 1024, imgH = state.imgH || 1024;
+    const ovW = Math.round(OV * imgW / (state.size || 1024)), ovH = Math.round(OV * imgH / (state.size || 1024));
+    const sc = OV / (state.size || 1024); // same scale for both axes
+    const rects = [];
+    for (const b of state.blanks) {
+      if (b.x >= imgW || b.y >= imgH) continue; // skip padding-area blanks
+      rects.push(`<rect x="${b.x*sc}" y="${b.y*sc}" width="${b.sz*sc}" height="${b.sz*sc}"
+        fill="rgba(120,120,120,0.22)" stroke="#888" stroke-width="1.5" stroke-dasharray="5 3"/>`);
+    }
+    for (const t of state.tiles.values()) {
+      if (t.x >= imgW || t.y >= imgH) continue; // skip padding-area tiles
+      rects.push(`<rect x="${t.x*sc}" y="${t.y*sc}" width="${t.sz*sc}" height="${t.sz*sc}"
+        fill="none" stroke="#e0512f" stroke-width="2"/>`);
+    }
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${ovW}" height="${ovH}" viewBox="0 0 ${ovW} ${ovH}">${rects.join('')}</svg>`;
+    // scale the full 1024×1024 base to 512×512 (uniform, no distortion),
+    // then crop the top-left content area — padding is on right/bottom so this is clean
+    const base512 = await sharp(basePath)
+      .resize(OV, OV, { fit: 'fill' })
+      .extract({ left: 0, top: 0, width: ovW, height: ovH })
+      .png().toBuffer();
+    const out = await sharp(base512)
+      .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
+      .png().toBuffer();
+    res.set('Cache-Control', 'no-store').type('png').send(out);
+  } catch (e) { console.error(e); res.status(500).end(); }
+});
+
+// /api/seed.png — transparent background; drawn over the view's black canvas so
+// only submitted/blank tiles appear and undrawn areas stay black.
+// Much cheaper than sending thousands of base64 PNGs through a WebSocket.
+app.get('/api/seed.png', async (_, res) => {
+  try {
+    if (!state) return res.status(404).end();
+    const comps = [];
+    for (const b of state.blanks) {
+      // snap to pure white or black — no grey on the view screen
+      // white blanks MUST be composited explicitly (canvas bg is black, transparent = black)
+      const v = (b.fill ?? 255) > 127 ? 255 : 0;
+      const buf = await sharp({ create: { width: b.sz, height: b.sz, channels: 3, background: { r: v, g: v, b: v } } }).png().toBuffer();
+      comps.push({ input: buf, left: b.x, top: b.y });
+    }
+    for (const [id, t] of state.tiles) {
+      const buf = await getLiveTilePng(id);
+      if (!buf) continue;
+      const img = await sharp(buf).resize(t.sz, t.sz, { fit: 'fill' }).toBuffer();
+      comps.push({ input: img, left: t.x, top: t.y });
+    }
+    const { imgW: iW = 1024, imgH: iH = 1024 } = state;
+    const base = sharp({ create: { width: iW, height: iH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } });
+    const out = comps.length ? await base.composite(comps).png().toBuffer() : await base.png().toBuffer();
+    res.set('Cache-Control', 'no-store').type('png').send(out);
+  } catch (e) { console.error(e); res.status(500).end(); }
+});
+
+app.get('/api/final-view.png', async (_, res) => {
+  try {
+    const out = await ensureFinalViewImage();
+    if (!out) return res.status(404).end();
+    res.set('Cache-Control', 'public, max-age=3600').type('png').send(out);
+  } catch (e) { console.error(e); res.status(500).end(); }
+});
+
+app.get('/api/final-view-thumb.png', async (_, res) => {
+  try {
+    const out = await ensureFinalViewThumb();
+    if (!out) return res.status(404).end();
+    res.set('Cache-Control', 'public, max-age=3600').type('png').send(out);
+  } catch (e) { console.error(e); res.status(500).end(); }
+});
+
+
+app.post('/api/config', (req, res) => {
+  const cfg = { ...getConfig(), ...req.body };
+  saveConfig(cfg);
+  broadcastPlayers({ type: 'config', ...cfg });
+  broadcastAdmins({ type: 'config', ...cfg });
+  res.json(cfg);
+  const blendChanged = req.body.blendMode !== undefined || req.body.blendGamma !== undefined;
+  const liveFilterChanged = req.body.liveMinPixelVotes !== undefined;
+  if (state && blendChanged) {
+    reblendAll().then(() => {
+      if (liveFilterChanged) broadcastViews({ type: 'view-sync' });
+    }).catch(console.error);
+  } else if (state && liveFilterChanged) {
+    rebuildLivePngs().then(() => broadcastViews({ type: 'view-sync' })).catch(console.error);
+  }
+});
+
+app.get('/api/config', (_, res) => res.json(getConfig()));
+app.get('/api/state', (_, res) => res.json(adminState()));
+
+// return submissions for a tile so admin can review them before clearing
+app.get('/api/tile/:id/submissions', (req, res) => {
+  const id = req.params.id;
+  if (!state || !state.tiles.has(id)) return res.status(404).json([]);
+  const rows = db.prepare('SELECT id, png FROM submissions WHERE tile=? ORDER BY created').all(id);
+  res.json(rows);
+});
+
+// delete a single submission — reblends the tile with what remains
+app.post('/api/submission/:id/delete', (req, res) => {
+  const subId = req.params.id;
+  const sub = db.prepare('SELECT tile FROM submissions WHERE id=?').get(subId);
+  if (!sub || !state || !state.tiles.has(sub.tile)) return res.status(404).json({ error: 'not found' });
+  db.prepare('DELETE FROM submissions WHERE id=?').run(subId);
+  const newCount = Math.max(0, (state.submissionCounts.get(sub.tile) || 0) - 1);
+  state.submissionCounts.set(sub.tile, newCount);
+  if (state.done && newCount < (state.redundancy || 3)) {
+    state.done = false;
+    invalidateFinalView();
+    broadcastAdmins({ type: 'incomplete' });
+  }
+  const t = state.tiles.get(sub.tile);
+  // cancel any pending delayed view update — the bad drawing must not appear after the delay
+  if (pendingViewTimers.has(sub.tile)) {
+    clearTimeout(pendingViewTimers.get(sub.tile));
+    pendingViewTimers.delete(sub.tile);
+  }
+  res.json({ ok: true, remaining: newCount });
+  // reblend async and broadcast
+  blendTile(sub.tile).then(async blended => {
+    if (blended) {
+      state.blendedPngs.set(sub.tile, blended);
+      state.livePngs.set(sub.tile, await renderLiveTilePng(sub.tile, blended));
+      const png = 'data:image/png;base64,' + blended.toString('base64');
+      broadcastAdmins({ type: 'tile-update', tileId: sub.tile, x: t.x, y: t.y, sz: t.sz, png, subs: newCount });
+      broadcastViews(await liveTileUpdate(sub.tile, t)); // admin action — always immediate
+    } else {
+      state.blendedPngs.set(sub.tile, null);
+      state.livePngs.set(sub.tile, null);
+      broadcastAdmins({ type: 'tile-cleared', tileId: sub.tile, x: t.x, y: t.y, sz: t.sz });
+      broadcastViews({ type: 'tile-cleared', tileId: sub.tile, x: t.x, y: t.y, sz: t.sz }); // admin action — always immediate
+    }
+    broadcastStats();
+  }).catch(console.error);
+});
+app.post('/api/tile/:id/clear', (req, res) => {
+  const id = req.params.id;
+  if (!state || !state.tiles.has(id)) return res.status(404).json({ error: 'not found' });
+  db.prepare('DELETE FROM submissions WHERE tile=?').run(id);
+  state.submissionCounts.set(id, 0);
+  state.blendedPngs.set(id, null);
+  state.livePngs.set(id, null);
+  if (state.done) {
+    state.done = false; // reopen the game if it had completed
+    invalidateFinalView();
+    broadcastAdmins({ type: 'incomplete' });
+  }
+  const t = state.tiles.get(id);
+  // cancel any pending delayed update — cleared tile should not appear after the delay
+  if (pendingViewTimers.has(id)) { clearTimeout(pendingViewTimers.get(id)); pendingViewTimers.delete(id); }
+  const msg = { type: 'tile-cleared', tileId: id, x: t.x, y: t.y, sz: t.sz };
+  broadcastAdmins(msg);
+  broadcastViews(msg); // admin action — always immediate, regardless of hold/delay
+  broadcastStats();
+  res.json({ ok: true });
+});
+app.get('/api/export.png', async (_, res) => {
+  try {
+    if (!state) return res.status(404).end();
+    const comps = [];
+    // blank tiles: composite any that aren't white
+    for (const b of state.blanks) {
+      const v = b.fill ?? 255;
+      if (v < 250) { // skip near-white blanks (canvas background handles those)
+        const solidBuf = await sharp({ create: { width: b.sz, height: b.sz, channels: 3, background: { r: v, g: v, b: v } } }).png().toBuffer();
+        comps.push({ input: solidBuf, left: b.x, top: b.y });
+      }
+    }
+    // submitted tiles
+    for (const [id, t] of state.tiles) {
+      let buf = state.blendedPngs.get(id);
+      if (!buf) { const r = await blendTile(id); if (r) { buf = r; state.blendedPngs.set(id, r); } }
+      if (!buf) continue;
+      const img = await sharp(buf).resize(t.sz, t.sz, { fit: 'fill' }).toBuffer();
+      comps.push({ input: img, left: t.x, top: t.y });
+    }
+    const { imgW: iW = 1024, imgH: iH = 1024 } = state;
+    const out = await sharp({ create: { width: iW, height: iH, channels: 3, background: '#ffffff' } })
+      .composite(comps).png().toBuffer();
+    res.type('png').send(out);
+  } catch (e) { console.error(e); res.status(500).end(); }
+});
+
+function adminState() {
+  if (!state) return { active: false };
+  const subs = db.prepare('SELECT tile, COUNT(*) n FROM submissions GROUP BY tile').all();
+  const cnt = new Map(subs.map(s => [s.tile, s.n]));
+  return {
+    active: true, done: state.done, size: state.size, redundancy: state.redundancy, imgW: state.imgW, imgH: state.imgH,
+    waitingCount: waiting.size, viewMode, viewDelay, viewBackground, viewSidebarWidth,
+    tiles: [...state.tiles.values()].map(t => ({ id: t.id, x: t.x, y: t.y, sz: t.sz, subs: cnt.get(t.id) || 0 })),
+    blanks: state.blanks,
+  };
+}
+
+function viewInitData() {
+  if (!state) return { active: false, background: viewBackground };
+  return { active: true, size: state.size, imgW: state.imgW, imgH: state.imgH,
+           blanks: state.blanks, sidebar: viewSidebar, background: viewBackground,
+           sidebarWidth: viewSidebarWidth };
+}
+
+function completionStats() {
+  if (!state) return { counted: 0, required: 0, coverage: 0 };
+  const redundancy = state.redundancy || 3;
+  const required = state.tiles.size * redundancy;
+  let counted = 0;
+  for (const n of state.submissionCounts.values()) counted += Math.min(n || 0, redundancy);
+  return {
+    counted,
+    required,
+    coverage: required > 0 ? Math.round(100 * counted / required) : 0
+  };
+}
+
+// ── websockets ────────────────────────────────────────────────────────────────
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server, path: '/ws' });
+const admins = new Set(), views = new Set(), players = new Set();
+const waiting = new Map(); // ws → give() — players held in waiting room
+
+const bcast = (set, obj) => { const s = JSON.stringify(obj); for (const ws of set) if (ws.readyState === 1) ws.send(s); };
+const broadcastAdmins  = o => bcast(admins, o);
+const broadcastViews   = o => bcast(views, o);
+const broadcastPlayers = o => bcast(players, o);
+
+// open the game: release all waiting players in batches to keep event loop responsive
+
+async function finishSession() {
+  if (!state) return;
+  if (state.done && finalViewPng) return;
+  state.done = true;
+  for (const t of pendingViewTimers.values()) clearTimeout(t);
+  pendingViewTimers.clear();
+  await ensureFinalViewImage();
+  broadcastAdmins({ type: 'done' });
+  broadcastViews({ type: 'view-sync' });
+  broadcastViews({ type: 'done' });
+  broadcastPlayers({ type: 'done' });
+  broadcastStats();
+}
+
+// reopen a stopped/finished game: clear the final image and pull players back in
+function resumeSession() {
+  if (!state) return;
+  state.done = false;
+  invalidateFinalView();
+  broadcastAdmins({ type: 'incomplete' });
+  broadcastPlayers({ type: 'resume' }); // players hide the "done" screen and request a tile
+  broadcastStats();
+}
+
+let viewMode    = 'live';
+let viewSidebar = false; // whether the view screen shows the stats sidebar
+let viewBackground = getConfig().viewBackground || 'black'; // big-screen bg, persisted as the default
+let viewSidebarWidth = getConfig().viewSidebarWidth || 27;  // big-screen sidebar width (% of screen)
+
+// ── stats broadcast (throttled) ──────────────────────────────────────────────
+let _statsTimer = null;
+function broadcastStats() {
+  if (_statsTimer) return;
+  _statsTimer = setTimeout(() => {
+    _statsTimer = null;
+    if (!state) return;
+    const { coverage } = completionStats();
+    broadcastViews({ type: 'stats', players: players.size, coverage });
+  }, 1200);
+}
+
+app.post('/api/view/sidebar', (req, res) => {
+  viewSidebar = !!req.body.on;
+  broadcastViews({ type: 'view-sidebar', on: viewSidebar });
+  broadcastAdmins({ type: 'view-sidebar', on: viewSidebar });
+  res.json({ ok: true, on: viewSidebar });
+});
+
+app.post('/api/view/background', (req, res) => {
+  viewBackground = req.body.bg === 'white' ? 'white' : 'black';
+  saveConfig({ ...getConfig(), viewBackground }); // persist as the standing default
+  broadcastViews({ type: 'view-background', bg: viewBackground });
+  broadcastAdmins({ type: 'view-background', bg: viewBackground });
+  res.json({ ok: true, bg: viewBackground });
+});
+
+app.post('/api/view/sidebar-width', (req, res) => {
+  viewSidebarWidth = Math.max(10, Math.min(50, parseInt(req.body.width, 10) || 27));
+  saveConfig({ ...getConfig(), viewSidebarWidth }); // persist as the standing default
+  broadcastViews({ type: 'view-sidebar-width', width: viewSidebarWidth });
+  broadcastAdmins({ type: 'view-sidebar-width', width: viewSidebarWidth });
+  res.json({ ok: true, width: viewSidebarWidth });
+});
+
+app.post('/api/view/delay', (req, res) => {  viewDelay = Math.max(0, Math.min(120, parseInt(req.body.delay, 10) || 0));
+  broadcastAdmins({ type: 'view-delay', delay: viewDelay });
+  res.json({ ok: true, delay: viewDelay });
+});
+app.post('/api/view/mode', (req, res) => {
+  const prevMode = viewMode;
+  viewMode = ['paused','hold'].includes(req.body.mode) ? req.body.mode : 'live';
+
+  if (viewMode !== 'live') {
+    // cancel all pending delayed updates when entering hold/blank
+    // so old timers can't fire and override admin's intent
+    for (const t of pendingViewTimers.values()) clearTimeout(t);
+    pendingViewTimers.clear();
+  }
+
+  broadcastViews({ type: 'view-mode', mode: viewMode });
+  broadcastAdmins({ type: 'view-mode', mode: viewMode });
+
+  if (prevMode !== 'live' && viewMode === 'live') {
+    // switching back to live: reseed so the view catches up with
+    // everything that happened (and was cleaned up) during hold/blank
+    broadcastViews({ type: 'view-sync' });
+  }
+
+  res.json({ ok: true, mode: viewMode });
+});
+
+// push current server state to view: cancel pending delays, reseed, paused→hold
+app.post('/api/view/sync', (_, res) => {
+  for (const t of pendingViewTimers.values()) clearTimeout(t);
+  pendingViewTimers.clear();
+  if (viewMode === 'paused') viewMode = 'hold'; // push removes blank screen
+  broadcastViews({ type: 'view-sync' });
+  broadcastAdmins({ type: 'view-mode', mode: viewMode });
+  res.json({ ok: true });
+});
+
+
+
+wss.on('connection', (ws, req) => {
+  const role = new URL(req.url, 'http://x').searchParams.get('role');
+  const send = o => { if (ws.readyState === 1) ws.send(JSON.stringify(o)); };
+
+  if (role === 'admin') {
+    admins.add(ws);
+    send({ type: 'state', ...adminState() });
+    send({ type: 'config', ...getConfig() });
+    send({ type: 'view-background', bg: viewBackground });
+    send({ type: 'view-sidebar-width', width: viewSidebarWidth });
+    ws.on('close', () => admins.delete(ws));
+    return;
+  }
+
+  if (role === 'view') {
+    views.add(ws);
+    send({ type: 'init', ...viewInitData() });
+    send({ type: 'view-mode', mode: viewMode });
+    send({ type: 'view-sidebar', on: viewSidebar });
+    send({ type: 'view-background', bg: viewBackground });
+    send({ type: 'view-sidebar-width', width: viewSidebarWidth });
+    broadcastStats();
+    ws.on('close', () => views.delete(ws));
+    return;
+  }
+
+  // player
+  players.add(ws);
+  broadcastAdmins({ type: 'player-count', count: players.size });
+  broadcastStats();
+  send({ type: 'config', ...getConfig() });
+
+  let currentTileId = null; // tile this player is currently holding
+
+  function releaseCurrentTile() {
+    if (currentTileId && state && state.activeCount) {
+      const n = state.activeCount.get(currentTileId) || 0;
+      if (n > 0) state.activeCount.set(currentTileId, n - 1);
+    }
+    currentTileId = null;
+  }
+
+  const give = () => {
+    if (state && state.done) { send({ type: 'done' }); return; }
+    releaseCurrentTile(); // free the previous tile before taking a new one
+    const t = assignTile();
+    if (!t) { send({ type: 'wait' }); return; }
+    currentTileId = t.id;
+    send({ type: 'tile', tileId: t.id, refUrl: '/refs/' + t.id + '.png' });
+  };
+
+  // always give a tile if a session is active
+  if (state && state.done) {
+    send({ type: 'done' }); // game finished — no point queuing them
+  } else if (state && !state.done) {
+    give();
+  } else {
+    waiting.set(ws, give);
+    send({ type: 'waiting' });
+    broadcastAdmins({ type: 'waiting-count', count: waiting.size });
+  }
+
+  ws.on('message', async raw => {
+    let m; try { m = JSON.parse(raw); } catch { return; }
+    if (m.type === 'next') {
+      waiting.delete(ws);
+      if (state && state.done) {
+        send({ type: 'done' });          // game finished
+      } else if (state && !state.done) {
+        give();                          // active game — get a tile
+      } else {
+        waiting.set(ws, give);           // no session loaded yet
+        send({ type: 'waiting' });
+        broadcastAdmins({ type: 'waiting-count', count: waiting.size });
+      }
+      return;
+    }
+    if (m.type === 'submit' && m.tileId && m.png && state && state.tiles.has(m.tileId)) {
+      // Validation (blank + stray-ink + similarity) is enforced entirely on the
+      // player's phone before it sends. The server trusts the submission here.
+      db.prepare('INSERT INTO submissions(id,tile,png,created) VALUES(?,?,?,?)')
+        .run(randomUUID(), m.tileId, m.png, Date.now());
+
+      const newCount = (state.submissionCounts.get(m.tileId) || 0) + 1;
+      state.submissionCounts.set(m.tileId, newCount);
+      releaseCurrentTile(); // slot is freed — submission accepted
+      send({ type: 'accepted' });
+
+      const blended = await blendTile(m.tileId);
+      if (blended) {
+        state.blendedPngs.set(m.tileId, blended);
+        state.livePngs.set(m.tileId, await renderLiveTilePng(m.tileId, blended));
+        const t = state.tiles.get(m.tileId);
+        const png = 'data:image/png;base64,' + blended.toString('base64');
+        const update = { type: 'tile-update', tileId: m.tileId, x: t.x, y: t.y, sz: t.sz, png, subs: state.submissionCounts.get(m.tileId) || 0 };
+        broadcastAdmins(update);
+        scheduleViewUpdate(await liveTileUpdate(m.tileId, t));
+        broadcastStats(); // update sidebar coverage %
+      }
+
+      if (!state.done) {
+        const redundancy = state.redundancy || 3;
+        const complete = [...state.submissionCounts.values()].every(n => n >= redundancy);
+        if (complete) await finishSession();
+      }
+    }
+  });
+  ws.on('close', () => {
+    releaseCurrentTile(); // free the tile so another player can pick it up
+    players.delete(ws);
+    broadcastAdmins({ type: 'player-count', count: players.size });
+    broadcastStats();
+    if (waiting.delete(ws)) broadcastAdmins({ type: 'waiting-count', count: waiting.size });
+  });
+});
+
+server.listen(PORT, HOST, () => console.log(`crowd-canvas on ${HOST}:${PORT}`));
