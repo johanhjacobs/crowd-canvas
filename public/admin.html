@@ -163,7 +163,8 @@
       <div class="gallery" id="gallery"></div>
     </div>
     <div class="card" style="margin-top:16px;">
-      <h2>Player colors</h2>
+      <h2>Colors</h2>
+      <label>Player colors</label>
       <div class="row">
         <div><label>Ink (brush)</label><input type="color" id="cInk" value="#000000"></div>
         <div><label>Paper (canvas)</label><input type="color" id="cPaper" value="#ffffff"></div>
@@ -171,6 +172,11 @@
         <div><label>Send button</label><input type="color" id="cSend" value="#e0512f"></div>
       </div>
       <button class="btn ghost sm" id="saveColors">Apply colors to players</button>
+      <label style="margin-top:14px;">Big screen colors</label>
+      <div class="row">
+        <div><label>Dark (bg)</label><input type="color" id="vcBgColor" value="#000000"></div>
+        <div><label>Light (fg)</label><input type="color" id="vcTextColor" value="#ffffff"></div>
+      </div>
     </div>
 
     <!-- blend -->
@@ -227,7 +233,7 @@
       <button class="vc-btn" id="vcBlank">■ Blank</button>
       <button class="vc-btn" id="vcPush">↑ Push</button>
       <button class="vc-btn" id="vcSidebar" title="Toggle stats sidebar on big screen">⬛ Sidebar</button>
-      <button class="vc-btn" id="vcBg" title="Big-screen background — click to switch">◼ Black</button>
+      <button class="vc-btn" id="vcBg" title="Swap big-screen colors">⇄ Swap</button>
     </div>
     <div class="view-settings">
       <div class="vs-row">
@@ -355,7 +361,6 @@ function connect() {
       document.getElementById('redundancy').value = targetRedundancy;
       // waiting room state
       if (m.viewMode) setViewCtrl(m.viewMode);
-      if (m.viewBackground) setBgBtn(m.viewBackground);
       if (m.viewSidebarWidth) setSidebarWidthUI(m.viewSidebarWidth);
       if (m.viewDelay !== undefined) {
         document.getElementById('delaySlider').value = m.viewDelay;
@@ -389,7 +394,7 @@ function connect() {
       btn.classList.toggle('active-live', m.on);
       btn.title = m.on ? 'Sidebar is ON — click to hide' : 'Toggle stats sidebar on big screen';
     }
-    else if (m.type === 'view-background') { setBgBtn(m.bg); }
+    else if (m.type === 'view-colors') { applyViewColorsAdmin(m.bg, m.text); }
     else if (m.type === 'view-sidebar-width') { setSidebarWidthUI(m.width); }
     else if (m.type === 'player-count') {
       document.getElementById('nOnline').textContent = m.count.toLocaleString();
@@ -644,17 +649,8 @@ document.getElementById('vcSidebar').addEventListener('click', () => {
 // reflect sidebar state from server (e.g. on reconnect)
 // handled in WS message handler: m.type === 'view-sidebar'
 
-let viewBg = 'black';
-function setBgBtn(bg) {
-  viewBg = bg === 'white' ? 'white' : 'black';
-  const btn = document.getElementById('vcBg');
-  btn.textContent = viewBg === 'white' ? '◻ White' : '◼ Black';
-  btn.classList.toggle('active-live', viewBg === 'white');
-  btn.title = `Big screen background: ${viewBg} — click to switch`;
-}
 document.getElementById('vcBg').addEventListener('click', () => {
-  const next = viewBg === 'white' ? 'black' : 'white';
-  fetch('/api/view/background', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({bg: next}) });
+  fetch('/api/view/background', { method:'POST' });
 });
 document.getElementById('delaySlider').addEventListener('input', function() {
   const v = +this.value;
@@ -673,6 +669,18 @@ document.getElementById('sidebarWidthSlider').addEventListener('input', function
 document.getElementById('sidebarWidthSlider').addEventListener('change', function() {
   fetch('/api/view/sidebar-width', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({width: +this.value}) });
 });
+
+function applyViewColorsAdmin(bg, text) {
+  document.getElementById('vcBgColor').value   = bg   || '#000000';
+  document.getElementById('vcTextColor').value = text || '#ffffff';
+}
+function pushViewColors() {
+  fetch('/api/view/colors', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ bg: document.getElementById('vcBgColor').value,
+                           text: document.getElementById('vcTextColor').value }) });
+}
+document.getElementById('vcBgColor').addEventListener('input', pushViewColors);
+document.getElementById('vcTextColor').addEventListener('input', pushViewColors);
 
 // ── auto-push ─────────────────────────────────────────────────────────────────
 let apTimer = null, apCountdown = 0, apSecs = 0;

@@ -2,34 +2,46 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#000000">
 <!-- loading screen: renders immediately before any JS or external resources -->
 <style>html,body{margin:0;background:#000;}#boot{position:fixed;inset:0;background:#000;z-index:999;display:flex;align-items:center;justify-content:center;}</style>
 <title>Crowd Canvas</title>
 <style>
   :root { --ink: #000; --paper: #fff; --bg: #e8e8e8; --send: #e0512f; }
-  *, *::before, *::after { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { margin: 0; height: 100%; overflow: hidden; touch-action: none; background: var(--bg);
-    font-family: system-ui, -apple-system, 'Helvetica Neue', sans-serif; }
+  *, *::before, *::after {
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: none;          /* prevent double-tap and pinch zoom on every element */
+    -webkit-user-select: none;   /* prevent text-selection zoom on iOS Safari */
+    user-select: none;
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg);
+    font-family: system-ui, -apple-system, 'Helvetica Neue', sans-serif;
+    overscroll-behavior: none; /* Android: disables pull-to-refresh and overscroll bounce */ }
   body { display: flex; justify-content: center; }
   main {
     width: 100%; max-width: 520px; height: 100%;
     display: flex; flex-direction: column; align-items: center;
     padding: 8px; gap: 8px;
   }
-  .card { border: 2px solid var(--ink); display: inline-block; flex-shrink: 0; position: relative; }
+  .card { border: none; display: inline-block; flex-shrink: 0; position: relative; }
+  #drawCard { box-shadow: 0 0 0 2px #555; }
   .canvas-stack { position: relative; display: block; }
   .canvas-stack canvas { position: absolute; top: 0; left: 0; display: block; }
   #paper { z-index: 1; }
   #ref { display: block; }
   #hint {
     margin: 6px 0 4px; font-size: 11px; text-transform: uppercase;
-    letter-spacing: .1em; color: #ffffff; opacity: .7; text-align: center;
+    letter-spacing: .1em; color: var(--ink); opacity: .7; text-align: center;
   }
   #ghost {
-    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    position: absolute;
+    /* width/height/left/top set in JS to match the tile zone exactly —
+       keeps the ghost out of the grey bleed zone on all sides */
     background-repeat: no-repeat;
+    background-size: 100% 100%;
     opacity: 0; pointer-events: none; z-index: 2;
     transition: opacity 0.35s ease;
     will-change: opacity;
@@ -43,6 +55,17 @@
   }
   .btn:active { opacity: .75; }
   .btn:disabled { opacity: .35; pointer-events: none; }
+  /* New-piece cooldown: grey at start, ink colour fills left-to-right over 8 s */
+  @keyframes next-cooldown {
+    from { background-position: 100% 0; }
+    to   { background-position:   0% 0; }
+  }
+  #nextBtn.cooling {
+    background-image: linear-gradient(to right, var(--ink) 50%, #888 50%);
+    background-size: 200% 100%;
+    background-position: 100% 0;
+    animation: next-cooldown 5s linear forwards;
+  }
   #submitBtn { background: var(--send); border-color: var(--send); }
   #waiting-screen, #done {
     position: fixed; inset: 0; background: var(--ink); color: #fff;
@@ -93,7 +116,8 @@
     padding: 12px 20px; border-radius: 32px;
     font-family: system-ui, -apple-system, sans-serif;
     font-size: 15px; font-weight: 700; letter-spacing: .01em;
-    text-align: center; white-space: nowrap;
+    text-align: center; white-space: normal;
+    max-width: min(82vw, 340px);
     opacity: 0; transition: opacity .22s, transform .22s; pointer-events: none;
     box-shadow: 0 4px 20px rgba(0,0,0,.35);
   }
@@ -190,10 +214,15 @@ function setup() {
   // bleedPx in CSS px — the offset from draw canvas edge to tile zone start
   bleedPx = (drawSide - tileSide) / 2; // = tileSide * 0.1
 
-  // ghost: sized and positioned to match the inner tile zone exactly (same as ref card)
+  // Ghost is sized and positioned to cover only the inner tile zone — not the bleed area.
+  // This prevents the reference image from visually bleeding into the grey border.
   const ghost = document.getElementById('ghost');
-  ghost.style.backgroundSize     = `${tileSide}px ${tileSide}px`;
-  ghost.style.backgroundPosition = `${bleedPx}px ${bleedPx}px`;
+  ghost.style.width  = tileSide + 'px';
+  ghost.style.height = tileSide + 'px';
+  ghost.style.left   = bleedPx  + 'px';
+  ghost.style.top    = bleedPx  + 'px';
+  ghost.style.backgroundSize     = '100% 100%';
+  ghost.style.backgroundPosition = '0 0';
 
   paintPaper();
   if (curRef) drawRef(curRef);
@@ -314,6 +343,13 @@ function connect() {
       similarityRetries = 0; // fresh tile — reset retry counter
       document.getElementById('waiting-screen').classList.remove('show');
       tileId = m.tileId; setBusy(false); clearDraw(); ghostClear(); updateTileUI();
+
+      // Solid black tile: warn the player to fill it completely, then let them draw normally.
+      const hint = document.getElementById('hint');
+      hint.textContent = m.fill === 0
+        ? '⬛ This piece is fully black — scribble it all in!'
+        : '✏️ Copy this image on the canvas below';
+
       const img = new Image();
       img.onload = () => {
         curRef = img; drawRef(img);
@@ -539,7 +575,10 @@ function classifySimilarity(score, details) {
   const strongLimit = Math.min(0.92, Math.max(simThreshold + 0.22, 0.68));
   const cleanEnough = details.spill <= maxStrayInk;
 
-  if (!cleanEnough) return { score, label: 'none', ok: false, details };
+  // For stray rejection, show the shape score as the displayed %, not the
+  // cleanliness-penalised final score.  The player may have traced the shape
+  // well — showing 0% because of a few stray marks feels unfair.
+  if (!cleanEnough) return { score: details.shapeScore, label: 'stray', ok: false, details };
   if (!coveredEnough) return { score, label: 'partial', ok: false, details };
   if (score < weakLimit) return { score, label: 'none', ok: false, details };
   if (score < simThreshold) return { score, label: 'weak', ok: false, details };
@@ -549,6 +588,7 @@ function classifySimilarity(score, details) {
 
 function similarityLabelText(label) {
   return ({
+    stray: 'Ink outside shape',
     none: 'No match',
     partial: 'Cover more',
     weak: 'Weak match',
@@ -602,15 +642,28 @@ function toast(msg) {
 }
 
 document.getElementById('clearBtn').addEventListener('click', clearDraw);
+let nextCooldownTimer = null;
 document.getElementById('nextBtn').addEventListener('click', () => {
-  if (ws && ws.readyState === 1) { tileId = null; updateTileUI(); setBusy(true); ws.send(JSON.stringify({ type: 'next' })); }
+  if (!ws || ws.readyState !== 1) return;
+  if (nextCooldownTimer) { toast('⏱ Wait a moment before skipping'); return; }
+  tileId = null; updateTileUI(); setBusy(true);
+  ws.send(JSON.stringify({ type: 'next' }));
+  const btn = document.getElementById('nextBtn');
+  btn.classList.add('cooling');
+  nextCooldownTimer = setTimeout(() => {
+    nextCooldownTimer = null;
+    btn.classList.remove('cooling');
+  }, 5000);
 });
 function showResultFlash(result, callback) {
   const el = document.getElementById('resultFlash');
   const pct = Math.round(result.score * 100);
   el.innerHTML = `<span class="rf-icon">${result.ok ? '✓' : '✗'}</span><span class="rf-pct">${pct}%</span><span class="rf-label">${similarityLabelText(result.label)}</span>`;
   el.className = result.ok ? 'ok' : 'fail';
-  setTimeout(() => { el.className = ''; el.innerHTML = ''; if (callback) callback(); }, 900);
+  // Wait for flash to fully fade (900ms display + 150ms CSS transition) before callback,
+  // so the toast never appears simultaneously with the flash.
+  setTimeout(() => { el.className = ''; el.innerHTML = ''; }, 900);
+  setTimeout(() => { if (callback) callback(); }, 1060);
 }
 
 document.getElementById('submitBtn').addEventListener('click', () => {
@@ -624,8 +677,6 @@ document.getElementById('submitBtn').addEventListener('click', () => {
   }
   showResultFlash(result, () => {
     if (result.label === 'partial') {
-      // covered too little of the shape — keep their work, nudge them to add more
-      toast('🖌️ Cover more of the shape — keep going!');
       ghostFail();   // fade the tracing guide in so they can see what's missing
       setBusy(false);
       return;
@@ -633,13 +684,11 @@ document.getElementById('submitBtn').addEventListener('click', () => {
     if (!result.ok) {
       similarityRetries++;
       if (similarityRetries <= 1) {
-        toast('🔄 Not quite — canvas cleared, try again!');
         clearDraw();
-        ghostHide();   // snap opacity to 0 but keep the image
-        ghostFail();   // fade back in so player can trace it
+        ghostHide();
+        ghostFail();
         setBusy(false);
       } else {
-        toast('🎨 Getting you a new piece…');
         setTimeout(() => {
           if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
         }, 1800);

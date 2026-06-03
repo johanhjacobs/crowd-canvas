@@ -60,6 +60,8 @@ const DEFAULT_CONFIG = {
   minCoverage: 0.60,         // min fraction of the reference ink the player must cover (0=off)
   viewBackground: 'black',   // big-screen default background: 'black' | 'white'
   viewSidebarWidth: 27,      // big-screen sidebar width as a % of screen width
+  viewBgColor:   '#000000',  // free background colour for the view screen
+  viewTextColor: '#ffffff',  // sidebar text / border colour
 };
 function getConfig() {
   const row = db.prepare("SELECT value FROM config WHERE key='main'").get();
@@ -208,6 +210,21 @@ async function slice(buffer, pieces, redundancy, includeSolidBlack = false) {
   db.exec('DELETE FROM submissions; DELETE FROM tiles; DELETE FROM sessions;');
   invalidateFinalView();
   fs.rmSync(REFS, { recursive: true, force: true }); fs.mkdirSync(REFS, { recursive: true });
+  // Save a normalised copy of the original for re-slicing.
+  // We preserve the 16:9 (or whatever) aspect ratio and cap at 4096px on the
+  // longest side — enough for any quadtree slice, and keeps the file a few MB
+  // even when the source is 4K or 8K.  Raw 8K PNGs can be 100 MB+; this isn't.
+  const RESLICE_MAX = 4096;
+  const resliceScale = Math.min(1, RESLICE_MAX / Math.max(origW, origH));
+  const resliceW = Math.max(1, Math.round(origW * resliceScale));
+  const resliceH = Math.max(1, Math.round(origH * resliceScale));
+  // Grayscale + max compression: B&W line art at 4K is typically 1–3 MB this way.
+  const originalSave = await sharp(buffer)
+    .flatten({ background: '#ffffff' })
+    .grayscale()
+    .resize(resliceW, resliceH, { fit: 'fill' })
+    .png({ compressionLevel: 9 }).toBuffer();
+  fs.writeFileSync(path.join(DATA, 'original.png'), originalSave);
   fs.writeFileSync(path.join(DATA, 'base.png'), base); // kept for overlay generation
 
   const id = randomUUID();
@@ -544,30 +561,33 @@ async function reblendAll() {
 }
 
 
-function assignTile(playerWs) {
+function assignTile(hasSubmitted = false) {
   if (!state || state.done) return null;
   const { tiles, tileIds, submissionCounts, activeCount, redundancy } = state;
   const n = tileIds.length;
 
   // Walk the shuffled deck starting from deckPos.
-  // Skip tiles that are: (a) already at submission cap, or
-  //                      (b) already have redundancy active drawers right now.
-  // This prevents piling 500 people onto tile #1 during a connection storm.
+  // Skip tiles that are: (a) already at submission cap,
+  //                      (b) already have redundancy active drawers right now, or
+  //                      (c) solid black (fill===0) for players on their first tile —
+  //                          they haven't seen how the game works yet.
   for (let i = 0; i < n; i++) {
     const idx = (state.deckPos + i) % n;
     const id  = tileIds[idx];
+    const t   = tiles.get(id);
     const subs   = submissionCounts.get(id) || 0;
     const active = activeCount.get(id) || 0;
-    if (subs >= redundancy) continue;         // tile already done
-    if (active >= redundancy) continue;       // enough people drawing it right now
-    // found a good tile — advance pointer past it for the next player
+    if (subs >= redundancy) continue;
+    if (active >= redundancy) continue;
+    if (!hasSubmitted && t.fill === 0) continue; // first-timer — skip solid black
     state.deckPos = (idx + 1) % n;
     activeCount.set(id, active + 1);
-    return tiles.get(id);
+    return t;
   }
 
-  // All tiles either done or fully occupied — fall back: pick any incomplete tile
-  // (ignores active cap, so late-game stragglers still get something)
+  // All preferred tiles done or occupied — fall back to any incomplete tile.
+  // This also covers the edge case where only black tiles remain: a first-timer
+  // gets one rather than waiting forever.
   for (let i = 0; i < n; i++) {
     const id = tileIds[(state.deckPos + i) % n];
     if ((submissionCounts.get(id) || 0) < redundancy) {
@@ -589,15 +609,17 @@ app.get('/',                 noCache, (_, res) => res.sendFile(path.join(__dirna
 app.get('/dropveters-admin', noCache, (_, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 app.get('/dropveters-view',  noCache, (_, res) => res.sendFile(path.join(__dirname, 'public', 'view.html')));
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+// 150 MB covers an uncompressed 8K B&W PNG; typical line-art files are far smaller.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 150 * 1024 * 1024 } });
 app.post('/api/session', upload.single('image'), async (req, res) => {
   try {
     let buffer;
     if (req.file) {
       buffer = req.file.buffer;
     } else {
-      // No new file uploaded — re-use the previously uploaded image (data/base.png)
-      const prevPath = path.join(DATA, 'base.png');
+      // No new file — re-use the original upload (not base.png, which is already
+      // squared/padded and would lose the original aspect ratio on re-slice).
+      const prevPath = path.join(DATA, 'original.png');
       if (!fs.existsSync(prevPath)) return res.status(400).json({ error: 'no image uploaded and no previous image found' });
       buffer = fs.readFileSync(prevPath);
     }
@@ -763,7 +785,7 @@ app.post('/api/config', (req, res) => {
 });
 
 app.get('/api/config', (_, res) => res.json(getConfig()));
-app.get('/api/has-previous-image', (_, res) => res.json({ exists: fs.existsSync(path.join(DATA, 'base.png')) }));
+app.get('/api/has-previous-image', (_, res) => res.json({ exists: fs.existsSync(path.join(DATA, 'original.png')) }));
 app.get('/api/state', (_, res) => res.json(adminState()));
 
 // return submissions for a tile so admin can review them before clearing
@@ -889,10 +911,11 @@ function adminState() {
 }
 
 function viewInitData() {
-  if (!state) return { active: false, background: viewBackground };
+  const colors = { bgColor: viewBgColor, textColor: viewTextColor };
+  if (!state) return { active: false, background: viewBackground, ...colors };
   return { active: true, size: state.size, imgW: state.imgW, imgH: state.imgH,
            blanks: state.blanks, sidebar: viewSidebar, background: viewBackground,
-           sidebarWidth: viewSidebarWidth };
+           sidebarWidth: viewSidebarWidth, ...colors };
 }
 
 function completionStats() {
@@ -1004,10 +1027,12 @@ function resumeSession() {
   broadcastStats();
 }
 
-let viewMode    = 'live';
-let viewSidebar = false; // whether the view screen shows the stats sidebar
-let viewBackground = getConfig().viewBackground || 'black'; // big-screen bg, persisted as the default
-let viewSidebarWidth = getConfig().viewSidebarWidth || 27;  // big-screen sidebar width (% of screen)
+let viewMode        = 'live';
+let viewSidebar     = false;
+let viewBackground  = getConfig().viewBackground  || 'black';
+let viewSidebarWidth = getConfig().viewSidebarWidth || 27;
+let viewBgColor     = getConfig().viewBgColor     || '#000000';
+let viewTextColor   = getConfig().viewTextColor   || '#ffffff';
 
 // ── stats broadcast (throttled) ──────────────────────────────────────────────
 let _statsTimer = null;
@@ -1028,12 +1053,14 @@ app.post('/api/view/sidebar', (req, res) => {
   res.json({ ok: true, on: viewSidebar });
 });
 
-app.post('/api/view/background', (req, res) => {
-  viewBackground = req.body.bg === 'white' ? 'white' : 'black';
-  saveConfig({ ...getConfig(), viewBackground }); // persist as the standing default
-  broadcastViews({ type: 'view-background', bg: viewBackground });
-  broadcastAdmins({ type: 'view-background', bg: viewBackground });
-  res.json({ ok: true, bg: viewBackground });
+app.post('/api/view/background', (_, res) => {
+  // Flip: swap bg and text colors
+  [viewBgColor, viewTextColor] = [viewTextColor, viewBgColor];
+  saveConfig({ ...getConfig(), viewBgColor, viewTextColor });
+  const msg = { type: 'view-colors', bg: viewBgColor, text: viewTextColor };
+  broadcastViews(msg);
+  broadcastAdmins(msg);
+  res.json({ ok: true, bg: viewBgColor, text: viewTextColor });
 });
 
 app.post('/api/view/sidebar-width', (req, res) => {
@@ -1042,6 +1069,17 @@ app.post('/api/view/sidebar-width', (req, res) => {
   broadcastViews({ type: 'view-sidebar-width', width: viewSidebarWidth });
   broadcastAdmins({ type: 'view-sidebar-width', width: viewSidebarWidth });
   res.json({ ok: true, width: viewSidebarWidth });
+});
+
+app.post('/api/view/colors', (req, res) => {
+  const hex = v => /^#[0-9a-f]{6}$/i.test(v) ? v : null;
+  if (hex(req.body.bg))   { viewBgColor   = req.body.bg;   }
+  if (hex(req.body.text)) { viewTextColor = req.body.text; }
+  saveConfig({ ...getConfig(), viewBgColor, viewTextColor });
+  const msg = { type: 'view-colors', bg: viewBgColor, text: viewTextColor };
+  broadcastViews(msg);
+  broadcastAdmins(msg);
+  res.json({ ok: true, bg: viewBgColor, text: viewTextColor });
 });
 
 app.post('/api/view/delay', (req, res) => {  viewDelay = Math.max(0, Math.min(120, parseInt(req.body.delay, 10) || 0));
@@ -1110,6 +1148,7 @@ wss.on('connection', (ws, req) => {
     send({ type: 'config', ...getConfig() });
     send({ type: 'view-background', bg: viewBackground });
     send({ type: 'view-sidebar-width', width: viewSidebarWidth });
+    send({ type: 'view-colors', bg: viewBgColor, text: viewTextColor });
     ws.on('close', () => admins.delete(ws));
     return;
   }
@@ -1133,6 +1172,7 @@ wss.on('connection', (ws, req) => {
   send({ type: 'config', ...getConfig() });
 
   let currentTileId = null; // tile this player is currently holding
+  let submittedCount = 0;   // successful submissions — gates solid black tiles
 
   function releaseCurrentTile() {
     if (currentTileId && state && state.activeCount) {
@@ -1144,11 +1184,11 @@ wss.on('connection', (ws, req) => {
 
   const give = () => {
     if (state && state.done) { send({ type: 'done' }); return; }
-    releaseCurrentTile(); // free the previous tile before taking a new one
-    const t = assignTile();
+    releaseCurrentTile();
+    const t = assignTile(submittedCount > 0); // only veterans get solid black tiles
     if (!t) { send({ type: 'wait' }); return; }
     currentTileId = t.id;
-    send({ type: 'tile', tileId: t.id, refUrl: '/refs/' + t.id + '.png' });
+    send({ type: 'tile', tileId: t.id, refUrl: '/refs/' + t.id + '.png', fill: t.fill ?? 255 });
   };
 
   // always give a tile if a session is active
@@ -1165,13 +1205,21 @@ wss.on('connection', (ws, req) => {
   ws.on('message', async raw => {
     let m; try { m = JSON.parse(raw); } catch { return; }
     if (m.type === 'next') {
+      // Rate-limit abandonment: if the player already holds a tile and is skipping it,
+      // enforce an 8-second cooldown. Auto-next after a successful submission is fine
+      // (currentTileId is already null by then because releaseCurrentTile was called).
+      if (currentTileId) {
+        const now = Date.now();
+        if (ws._lastAbandon && now - ws._lastAbandon < 5000) return; // silently drop
+        ws._lastAbandon = now;
+      }
       waiting.delete(ws);
       if (state && state.done) {
-        send({ type: 'done' });          // game finished
+        send({ type: 'done' });
       } else if (state && !state.done) {
-        give();                          // active game — get a tile
+        give();
       } else {
-        waiting.set(ws, give);           // no session loaded yet
+        waiting.set(ws, give);
         send({ type: 'waiting' });
         broadcastAdmins({ type: 'waiting-count', count: waiting.size });
       }
@@ -1193,6 +1241,7 @@ wss.on('connection', (ws, req) => {
 
       const newCount = (state.submissionCounts.get(m.tileId) || 0) + 1;
       state.submissionCounts.set(m.tileId, newCount);
+      submittedCount++; // player has now drawn at least one tile — black tiles unlocked
       releaseCurrentTile(); // slot is freed — submission accepted
       send({ type: 'accepted' });
 
