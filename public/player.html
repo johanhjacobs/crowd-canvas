@@ -262,21 +262,21 @@ drawC.addEventListener('pointermove', e => {
 ['pointerup','pointercancel','pointerleave'].forEach(ev =>
   drawC.addEventListener(ev, () => drawing = false));
 
-// ── submit: crop inner tile zone only ─────────────────────────────────────────
+// ── submit: crop inner tile zone, always at 256×256 ──────────────────────────
+// Submitting at device resolution (up to 660×660 on dpr=3 phones) wastes
+// bandwidth and DB space — the server resizes to 256×256 anyway for blending.
+// Doing the resize here saves ~5–8× payload per submission (150 KB → 25 KB).
 function buildSubmitCanvas() {
-  const tileDev = Math.round(tileSide * dpr);
-  const flat = document.createElement('canvas');
-  flat.width = tileDev; flat.height = tileDev;
-  const fc = flat.getContext('2d');
-  // compute exact bleed offset in device pixels (symmetric)
+  const tileDev  = Math.round(tileSide * dpr);
   const bleedDev = Math.floor((paperC.width - tileDev) / 2);
+  const OUT = 256; // server always works at 256×256
+  const flat = document.createElement('canvas');
+  flat.width = OUT; flat.height = OUT;
+  const fc = flat.getContext('2d');
   fc.fillStyle = PAPER;
-  fc.fillRect(0, 0, tileDev, tileDev);
-  // composite paper inner zone (white bg, no border — start fresh for clean submit)
-  fc.fillStyle = PAPER;
-  fc.fillRect(0, 0, tileDev, tileDev);
-  // user strokes from draw canvas, inner zone only
-  fc.drawImage(drawC, bleedDev, bleedDev, tileDev, tileDev, 0, 0, tileDev, tileDev);
+  fc.fillRect(0, 0, OUT, OUT);
+  // draw only the inner tile zone (crop out bleed), scaled down to 256×256
+  fc.drawImage(drawC, bleedDev, bleedDev, tileDev, tileDev, 0, 0, OUT, OUT);
   return flat;
 }
 

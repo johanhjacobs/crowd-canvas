@@ -118,7 +118,7 @@
     <!-- session -->
     <div class="card">
       <h2>Session</h2>
-      <label>Image (black &amp; white)</label>
+      <label>Image (black &amp; white) — <span id="prevImgNote" style="color:var(--muted);display:none;">leave empty to re-use previous image</span><span id="noPrevNote">required</span></label>
       <input type="file" id="file" accept="image/*">
       <label>Pieces (target)</label>
       <input type="number" id="pieces" value="120" min="1" max="2000">
@@ -151,6 +151,7 @@
         <button class="btn ghost sm" id="stopBtn">Stop game now</button>
         <button class="btn ghost sm" id="fillBtn">Finish &amp; fill remaining ↓</button>
         <button class="btn ghost sm" id="resumeBtn" style="display:none;">Resume game now</button>
+        <button class="btn ghost sm" id="restartBtn" style="display:none;">Restart game (keep tiles)</button>
       </div>
     </div>
 
@@ -326,7 +327,8 @@ function setGameDoneUI(done) {
   const fb = document.getElementById('fillBtn');
   fb.style.display = done ? 'none' : '';
   if (!done) { fb.textContent = 'Finish & fill remaining ↓'; fb.disabled = false; }
-  document.getElementById('resumeBtn').style.display = done ? '' : 'none';
+  document.getElementById('resumeBtn').style.display  = done ? '' : 'none';
+  document.getElementById('restartBtn').style.display = '';  // always visible when session active
 }
 
 // ── WS ────────────────────────────────────────────────────────────────────────
@@ -489,13 +491,23 @@ function showJoin() {
 }
 
 // ── session ───────────────────────────────────────────────────────────────────
+// Check whether a previous image exists on the server and update the label
+fetch('/api/has-previous-image').then(r => r.json()).then(({ exists }) => {
+  document.getElementById('prevImgNote').style.display = exists ? '' : 'none';
+  document.getElementById('noPrevNote').style.display  = exists ? 'none' : '';
+}).catch(() => {});
+
 document.getElementById('startBtn').addEventListener('click', async () => {
   const f = document.getElementById('file').files[0];
-  if (!f) { alert('Pick an image first'); return; }
   const btn = document.getElementById('startBtn');
+  // Allow starting without a file only if the server has a previous image
+  if (!f) {
+    const check = await fetch('/api/has-previous-image').then(r => r.json()).catch(() => ({ exists: false }));
+    if (!check.exists) { alert('Pick an image first — no previous image found on the server.'); return; }
+  }
   btn.textContent = 'Slicing…'; btn.disabled = true;
   const fd = new FormData();
-  fd.append('image', f);
+  if (f) fd.append('image', f);   // omit if re-using previous
   fd.append('pieces', document.getElementById('pieces').value);
   fd.append('redundancy', document.getElementById('redundancy').value);
   fd.append('includeSolidBlack', document.getElementById('includeSolid').checked);
@@ -505,6 +517,17 @@ document.getElementById('startBtn').addEventListener('click', async () => {
     if (!r.ok) { alert('Server error: ' + (j.error || r.status)); }
   } catch (e) { alert('Request failed: ' + e.message); }
   btn.textContent = 'Slice & start'; btn.disabled = false;
+});
+
+document.getElementById('restartBtn').addEventListener('click', async () => {
+  if (!confirm('Restart the game? This wipes all drawings and starts fresh with the same tiles.')) return;
+  const btn = document.getElementById('restartBtn');
+  btn.textContent = 'Restarting…'; btn.disabled = true;
+  try {
+    const r = await fetch('/api/session/restart', { method: 'POST' });
+    if (!r.ok) alert('Could not restart game');
+  } catch (e) { alert('Request failed: ' + e.message); }
+  btn.textContent = 'Restart game (keep tiles)'; btn.disabled = false;
 });
 document.getElementById('exportBtn').addEventListener('click', () => {
   const a = document.createElement('a'); a.href = '/api/export.png?t=' + Date.now(); a.download = 'mosaic.png'; a.click();

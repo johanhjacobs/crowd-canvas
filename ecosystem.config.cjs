@@ -5,13 +5,18 @@ module.exports = {
   apps: [{
     name: 'crowd-canvas',
     script: 'server.js',
-    exec_mode: 'fork',
+    exec_mode: 'fork',   // MUST stay fork — cluster mode would desync in-memory state
     instances: 1,
     env: {
       PORT: 3100,
       HOST: '127.0.0.1',
+      // Sharp uses libuv's thread pool for all native async ops.
+      // Default is 4 threads — far too low for 600 concurrent Sharp decodes/second.
+      // On an AX102 (16 cores / 32 threads) 16 is a safe, well-benchmarked value.
+      UV_THREADPOOL_SIZE: 16,
     },
-    // restart if memory runs away during a very large event
-    max_memory_restart: '2G',
+    // AX102 has 128 GB RAM; the accumulator for 5000 tiles peaks at ~1.3 GB.
+    // Set ceiling well above that so PM2 doesn't restart mid-event.
+    max_memory_restart: '6G',
   }],
 };

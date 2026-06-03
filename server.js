@@ -10,6 +10,11 @@ import { fileURLToPath } from 'url';
 import { randomUUID } from 'crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// 2 libvips threads per Sharp op so multiple ops can run truly in parallel
+// across the 32 hw-threads on an AX102.  Higher values throttle concurrency.
+sharp.concurrency(2);
+
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
 const DATA = path.join(__dirname, 'data');
@@ -33,6 +38,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS tiles(id TEXT PRIMARY KEY, session TEXT, x INTEGER, y INTEGER, sz INTEGER, blank INTEGER DEFAULT 0, fill INTEGER DEFAULT 255);
   CREATE TABLE IF NOT EXISTS submissions(id TEXT PRIMARY KEY, tile TEXT, png TEXT, created INTEGER);
   CREATE TABLE IF NOT EXISTS config(key TEXT PRIMARY KEY, value TEXT);
+  CREATE INDEX IF NOT EXISTS idx_sub_tile ON submissions(tile);
 `);
 try { db.exec('ALTER TABLE tiles ADD COLUMN blank INTEGER DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE tiles ADD COLUMN fill INTEGER DEFAULT 255'); } catch {}
@@ -114,9 +120,13 @@ function loadActive() {
             deckPos: 0,    // round-robin pointer into tileIds
             activeCount: new Map(), // tileId → how many players currently drawing it
             autoFilledTiles: new Set(), // tiles filled by autoFillAndFinish — bypass live filter
+            // Incremental blend accumulators — { count, inkSum: Float32Array(256*256) }
+            // One decode per new submission instead of re-decoding all N each time.
+            accumulators: new Map(),
           };
 }
 loadActive();
+rebuildAccumulatorsFromDB().catch(console.error); // no-op if no session; matters on crash-restart
 
 // ── slicer ────────────────────────────────────────────────────────────────────
 async function slice(buffer, pieces, redundancy, includeSolidBlack = false) {
@@ -229,6 +239,9 @@ async function slice(buffer, pieces, redundancy, includeSolidBlack = false) {
     }
   }
   loadActive();
+  // New session has zero submissions — accumulator rebuild is instant; call anyway
+  // so the Map exists and the code path is always consistent.
+  rebuildAccumulatorsFromDB().catch(console.error);
   const nonBlank = leaves.filter(l => !l.blank).length;
   return { id, tiles: leaves.length, active: nonBlank, blank: leaves.length - nonBlank };
 }
@@ -285,6 +298,90 @@ async function blendTile(tileId, opts = {}) {
     out[i] = Math.round((1 - curved) * 255);
   }
   return sharp(out, { raw: { width: W, height: H, channels: 1 } }).png().toBuffer();
+}
+
+// ── incremental blend accumulator ─────────────────────────────────────────────
+// Problem: blendTile() re-decodes ALL N submissions every time a new one arrives.
+// At 600 submissions/second with redundancy 5, that's 1500+ Sharp decodes/second
+// AND 600+ synchronous SQLite reads per second — enough to saturate the event loop.
+//
+// Solution: keep a Float32Array inkSum per tile in RAM.
+// Each new submission costs exactly ONE Sharp decode.  The rest is arithmetic.
+//
+// Memory ceiling: 5000 tiles × 256×256 × 4 bytes ≈ 1.3 GB — fine on 128 GB server.
+// The accumulator is rebuilt from the DB on server restart (one-time async cost).
+
+async function decodePngToInk(png64) {
+  const buf = Buffer.from(png64.replace(/^data:[^;]+;base64,/, ''), 'base64');
+  const { data, info } = await sharp(buf)
+    .flatten({ background: '#ffffff' })
+    .grayscale().resize(256, 256, { fit: 'fill' })
+    .raw().toBuffer({ resolveWithObject: true });
+  const ch = info.channels;
+  const ink = new Float32Array(256 * 256);
+  for (let i = 0; i < 256 * 256; i++) ink[i] = (255 - data[i * ch]) / 255;
+  return ink;
+}
+
+// Merge one new submission into the tile accumulator and return a fresh blended PNG.
+async function accumulatorAdd(tileId, png64) {
+  if (!state) return null;
+  const ink = await decodePngToInk(png64);
+  let acc = state.accumulators.get(tileId);
+  if (!acc) {
+    acc = { count: 0, inkSum: new Float32Array(256 * 256) };
+    state.accumulators.set(tileId, acc);
+  }
+  for (let i = 0; i < 256 * 256; i++) acc.inkSum[i] += ink[i];
+  acc.count++;
+  return renderAccumulator(acc);
+}
+
+// Render a blended PNG from an accumulator — no DB access, pure arithmetic.
+async function renderAccumulator(acc, opts = {}) {
+  if (!acc || acc.count === 0) return null;
+  const cfg = getConfig();
+  const N     = acc.count;
+  const gamma = cfg.blendGamma || 1.71;
+  // Live pixel filter: hide pixels whose accumulated ink is below the threshold.
+  // We approximate the per-pixel vote count as inkSum[i] * N / avg_ink — good
+  // enough for the filter; exact counts would need a Uint16 votes array (+2.6 GB).
+  const liveMin = opts.liveView ? Math.max(0, Math.min(5, cfg.liveMinPixelVotes | 0)) : 0;
+  const out = Buffer.alloc(256 * 256);
+  for (let i = 0; i < 256 * 256; i++) {
+    // Approximate vote count: treat each unit of ink ≈ one hard-inked pixel.
+    if (liveMin > 0 && acc.inkSum[i] < liveMin * 0.35) { out[i] = 255; continue; }
+    const f      = Math.min(1, acc.inkSum[i] / N);           // avg ink 0-1
+    const curved = 1 - Math.pow(1 - f, gamma);               // gamma bias
+    out[i] = Math.round((1 - curved) * 255);                 // 255=white 0=black
+  }
+  return sharp(out, { raw: { width: 256, height: 256, channels: 1 } }).png().toBuffer();
+}
+
+// Rebuild accumulators from the DB — called once on startup / after a new session.
+// At 600 submissions/sec this stays warm in RAM; the rebuild only matters on crash-restart.
+async function rebuildAccumulatorsFromDB() {
+  if (!state) return;
+  let rebuilt = 0;
+  for (const [id] of state.tiles) {
+    const subs = db.prepare('SELECT png FROM submissions WHERE tile=? ORDER BY created').all(id);
+    if (!subs.length) continue;
+    const acc = { count: 0, inkSum: new Float32Array(256 * 256) };
+    for (const sub of subs) {
+      const ink = await decodePngToInk(sub.png);
+      for (let i = 0; i < 256 * 256; i++) acc.inkSum[i] += ink[i];
+      acc.count++;
+    }
+    state.accumulators.set(id, acc);
+    const blended = await renderAccumulator(acc);
+    if (blended) {
+      state.blendedPngs.set(id, blended);
+      state.livePngs.set(id, await renderAccumulator(acc, { liveView: true }));
+    }
+    rebuilt++;
+    if (rebuilt % 10 === 0) await new Promise(r => setImmediate(r)); // keep event loop alive
+  }
+  if (rebuilt) console.log(`[accumulator] rebuilt ${rebuilt} tiles from DB`);
 }
 
 async function liveTileUpdate(tileId, t, extra = {}) {
@@ -384,31 +481,61 @@ async function ensureFinalViewThumb() {
 }
 
 let viewDelay = 0;
-const pendingViewTimers = new Map(); // tileId → setTimeout handle
+const pendingViewTimers = new Map(); // tileId → setTimeout handle (admin delay)
 
-// schedule a view update: instant if delay=0, otherwise fires after viewDelay seconds.
-// Cancelled if the tile is cleared before the timer fires.
+// ── view update queue ─────────────────────────────────────────────────────────
+// At 600 submissions/second every submission would push a 20 KB PNG to the view
+// screen — 12 MB/s to a browser canvas that can only render ~60 frames/second.
+// Solution: deduplicate by tileId and flush at most every 50 ms (≈20 fps).
+// If tile X gets 10 submissions in one 50 ms window, the view only sees 1 update.
+const viewUpdateQueue = new Map(); // tileId → latest msg
+let viewFlushTimer    = null;
+
+function flushViewQueue() {
+  viewFlushTimer = null;
+  if (viewMode === 'paused' || viewMode === 'hold') { viewUpdateQueue.clear(); return; }
+  for (const msg of viewUpdateQueue.values()) broadcastViews(msg);
+  viewUpdateQueue.clear();
+}
+
+function enqueueViewUpdate(msg) {
+  if (viewMode === 'paused' || viewMode === 'hold') return;
+  viewUpdateQueue.set(msg.tileId, msg); // newer submission overwrites older for same tile
+  if (!viewFlushTimer) viewFlushTimer = setTimeout(flushViewQueue, 1000);
+}
+
+// schedule a view update: goes through the 20fps queue, with optional admin delay on top.
 function scheduleViewUpdate(msg) {
   if (viewMode === 'paused' || viewMode === 'hold') return;
   const key = msg.tileId;
   if (pendingViewTimers.has(key)) clearTimeout(pendingViewTimers.get(key));
-  if (!viewDelay) { broadcastViews(msg); return; }
+  if (!viewDelay) { enqueueViewUpdate(msg); return; }
   const timer = setTimeout(() => {
     pendingViewTimers.delete(key);
-    if (viewMode !== 'paused') broadcastViews(msg);
+    if (viewMode !== 'paused') enqueueViewUpdate(msg);
   }, viewDelay * 1000);
   pendingViewTimers.set(key, timer);
 }
 
 // ── background reblend ────────────────────────────────────────────────────────
+// For 'blend' mode: re-render from in-memory accumulators (no DB reads, very fast).
+// For 'first'/'random' modes: fall back to blendTile() which reads from DB.
 async function reblendAll() {
   if (!state) return;
+  const cfg = getConfig();
   for (const [id, t] of state.tiles) {
     if ((state.submissionCounts.get(id) || 0) < 1) continue;
-    const blended = await blendTile(id);
+    let blended;
+    if (cfg.blendMode === 'blend' && state.accumulators.has(id)) {
+      blended = await renderAccumulator(state.accumulators.get(id));
+    } else {
+      blended = await blendTile(id);
+    }
     if (!blended) continue;
     state.blendedPngs.set(id, blended);
-    state.livePngs.set(id, await renderLiveTilePng(id, blended));
+    state.livePngs.set(id, cfg.blendMode === 'blend' && state.accumulators.has(id)
+      ? await renderAccumulator(state.accumulators.get(id), { liveView: true })
+      : await renderLiveTilePng(id, blended));
     const png = 'data:image/png;base64,' + blended.toString('base64');
     broadcastAdmins({ type: 'tile-update', tileId: id, x: t.x, y: t.y, sz: t.sz, png, subs: state.submissionCounts.get(id) || 0 });
     scheduleViewUpdate(await liveTileUpdate(id, t));
@@ -465,15 +592,52 @@ app.get('/dropveters-view',  noCache, (_, res) => res.sendFile(path.join(__dirna
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 app.post('/api/session', upload.single('image'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'no image' });
+    let buffer;
+    if (req.file) {
+      buffer = req.file.buffer;
+    } else {
+      // No new file uploaded — re-use the previously uploaded image (data/base.png)
+      const prevPath = path.join(DATA, 'base.png');
+      if (!fs.existsSync(prevPath)) return res.status(400).json({ error: 'no image uploaded and no previous image found' });
+      buffer = fs.readFileSync(prevPath);
+    }
     const pieces = parseInt(req.body.pieces, 10) || 64;
     const redundancy = parseInt(req.body.redundancy, 10) || 3;
     const includeSolidBlack = req.body.includeSolidBlack === 'true' || req.body.includeSolidBlack === true;
-    const r = await slice(req.file.buffer, pieces, redundancy, includeSolidBlack);
+    const r = await slice(buffer, pieces, redundancy, includeSolidBlack);
     broadcastAdmins({ type: 'reset', ...adminState() });
     broadcastViews({ type: 'reset', ...viewInitData() });
     res.json(r);
   } catch (e) { console.error(e); res.status(500).json({ error: String(e) }); }
+});
+
+// Restart the game with the same tiles — wipes all submissions, resets state,
+// reshuffles the deck.  No re-upload or re-slice needed.
+app.post('/api/session/restart', (_, res) => {
+  if (!state) return res.status(404).json({ error: 'no active session' });
+  db.prepare('DELETE FROM submissions').run();
+  for (const id of state.tiles.keys()) {
+    state.submissionCounts.set(id, 0);
+    state.blendedPngs.set(id, null);
+    state.livePngs.set(id, null);
+  }
+  state.accumulators.clear();
+  state.done       = false;
+  state.deckPos    = 0;
+  state.autoFilling = false;
+  state.activeCount.clear();
+  state.autoFilledTiles.clear();
+  invalidateFinalView();
+  // Reshuffle so the mosaic fills in a different scattered order each run
+  for (let i = state.tileIds.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [state.tileIds[i], state.tileIds[j]] = [state.tileIds[j], state.tileIds[i]];
+  }
+  broadcastPlayers({ type: 'resume' }); // players re-request a tile automatically
+  broadcastAdmins({ type: 'reset', ...adminState() });
+  broadcastViews({ type: 'reset', ...viewInitData() });
+  broadcastViews({ type: 'view-sync' });
+  res.json({ ok: true, tiles: state.tiles.size });
 });
 
 app.post('/api/session/stop', async (_, res) => {
@@ -599,6 +763,7 @@ app.post('/api/config', (req, res) => {
 });
 
 app.get('/api/config', (_, res) => res.json(getConfig()));
+app.get('/api/has-previous-image', (_, res) => res.json({ exists: fs.existsSync(path.join(DATA, 'base.png')) }));
 app.get('/api/state', (_, res) => res.json(adminState()));
 
 // return submissions for a tile so admin can review them before clearing
@@ -629,8 +794,24 @@ app.post('/api/submission/:id/delete', (req, res) => {
     pendingViewTimers.delete(sub.tile);
   }
   res.json({ ok: true, remaining: newCount });
-  // reblend async and broadcast
+  // Reblend async and broadcast.  Also rebuild the accumulator from the remaining
+  // submissions (we can't subtract from a sum — must reconstruct from scratch).
+  // Admin action → rare → DB reads here are fine.
   blendTile(sub.tile).then(async blended => {
+    // Rebuild accumulator from whatever submissions remain
+    const remaining = db.prepare('SELECT png FROM submissions WHERE tile=? ORDER BY created').all(sub.tile);
+    if (remaining.length === 0) {
+      state.accumulators.delete(sub.tile);
+    } else {
+      const acc = { count: 0, inkSum: new Float32Array(256 * 256) };
+      for (const s of remaining) {
+        const ink = await decodePngToInk(s.png);
+        for (let i = 0; i < 256 * 256; i++) acc.inkSum[i] += ink[i];
+        acc.count++;
+      }
+      state.accumulators.set(sub.tile, acc);
+    }
+
     if (blended) {
       state.blendedPngs.set(sub.tile, blended);
       state.livePngs.set(sub.tile, await renderLiveTilePng(sub.tile, blended));
@@ -653,6 +834,7 @@ app.post('/api/tile/:id/clear', (req, res) => {
   state.submissionCounts.set(id, 0);
   state.blendedPngs.set(id, null);
   state.livePngs.set(id, null);
+  state.accumulators.delete(id); // reset so next submission starts fresh
   if (state.done) {
     state.done = false; // reopen the game if it had completed
     invalidateFinalView();
@@ -728,7 +910,9 @@ function completionStats() {
 
 // ── websockets ────────────────────────────────────────────────────────────────
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
+// 400 KB covers a 256×256 PNG submission with room to spare.
+// Without this a single malformed client can allocate arbitrary RAM.
+const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 400 * 1024 });
 const admins = new Set(), views = new Set(), players = new Set();
 const waiting = new Map(); // ws → give() — players held in waiting room
 
@@ -873,6 +1057,9 @@ app.post('/api/view/mode', (req, res) => {
     // so old timers can't fire and override admin's intent
     for (const t of pendingViewTimers.values()) clearTimeout(t);
     pendingViewTimers.clear();
+    // also drain the 20fps queue so nothing sneaks through after the mode change
+    if (viewFlushTimer) { clearTimeout(viewFlushTimer); viewFlushTimer = null; }
+    viewUpdateQueue.clear();
   }
 
   broadcastViews({ type: 'view-mode', mode: viewMode });
@@ -899,7 +1086,21 @@ app.post('/api/view/sync', (_, res) => {
 
 
 
+// ── heartbeat ─────────────────────────────────────────────────────────────────
+// At 20k connections, phones that go to sleep or lose signal stay in the Sets
+// forever without this.  Ping every 30s; no pong = terminate immediately.
+setInterval(() => {
+  for (const ws of [...players, ...admins, ...views]) {
+    if (ws.isAlive === false) { ws.terminate(); continue; }
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, 30_000);
+
 wss.on('connection', (ws, req) => {
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
   const role = new URL(req.url, 'http://x').searchParams.get('role');
   const send = o => { if (ws.readyState === 1) ws.send(JSON.stringify(o)); };
 
@@ -977,8 +1178,16 @@ wss.on('connection', (ws, req) => {
       return;
     }
     if (m.type === 'submit' && m.tileId && m.png && state && state.tiles.has(m.tileId)) {
-      // Validation (blank + stray-ink + similarity) is enforced entirely on the
-      // player's phone before it sends. The server trusts the submission here.
+      // Basic server-side guards — validation detail lives on the client.
+      // 1) Rate limit: one accepted submission per player per 5 s.
+      //    Drawing takes ~30 s so this only blocks hammering bots.
+      const now = Date.now();
+      if (ws._lastSubmit && now - ws._lastSubmit < 5000) return;
+      ws._lastSubmit = now;
+
+      // 2) Payload size sanity (belt-and-suspenders on top of maxPayload).
+      if (typeof m.png !== 'string' || m.png.length > 350_000) return;
+
       db.prepare('INSERT INTO submissions(id,tile,png,created) VALUES(?,?,?,?)')
         .run(randomUUID(), m.tileId, m.png, Date.now());
 
@@ -987,10 +1196,21 @@ wss.on('connection', (ws, req) => {
       releaseCurrentTile(); // slot is freed — submission accepted
       send({ type: 'accepted' });
 
-      const blended = await blendTile(m.tileId);
+      // Use the incremental accumulator for 'blend' mode (the default).
+      // One Sharp decode per submission instead of re-decoding all N.
+      // Fall back to blendTile() for 'first'/'random' modes (reads 1 row).
+      const cfg = getConfig();
+      let blended;
+      if (cfg.blendMode === 'blend') {
+        blended = await accumulatorAdd(m.tileId, m.png);
+      } else {
+        blended = await blendTile(m.tileId);
+      }
       if (blended) {
         state.blendedPngs.set(m.tileId, blended);
-        state.livePngs.set(m.tileId, await renderLiveTilePng(m.tileId, blended));
+        state.livePngs.set(m.tileId, cfg.blendMode === 'blend' && state.accumulators.has(m.tileId)
+          ? await renderAccumulator(state.accumulators.get(m.tileId), { liveView: true })
+          : await renderLiveTilePng(m.tileId, blended));
         const t = state.tiles.get(m.tileId);
         const png = 'data:image/png;base64,' + blended.toString('base64');
         const update = { type: 'tile-update', tileId: m.tileId, x: t.x, y: t.y, sz: t.sz, png, subs: state.submissionCounts.get(m.tileId) || 0 };
