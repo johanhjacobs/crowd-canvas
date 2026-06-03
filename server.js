@@ -62,6 +62,9 @@ const DEFAULT_CONFIG = {
   viewSidebarWidth: 27,      // big-screen sidebar width as a % of screen width
   viewBgColor:   '#000000',  // free background colour for the view screen
   viewTextColor: '#ffffff',  // sidebar text / border colour
+  viewSidebarOn: false,      // whether the sidebar is visible on the big screen
+  defaultPieces: 120,        // last-used slice piece count — restored in admin UI
+  defaultIncludeSolidBlack: false, // last-used includeSolidBlack flag
 };
 function getConfig() {
   const row = db.prepare("SELECT value FROM config WHERE key='main'").get();
@@ -257,7 +260,7 @@ async function slice(buffer, pieces, redundancy, includeSolidBlack = false) {
   }
   loadActive();
   rebuildAccumulatorsFromDB().catch(console.error);
-  seedPngCache = null; // new session — old cache is invalid
+  seedPngCache = exportPngCache = null; // new session — old caches invalid
   const nonBlank = leaves.filter(l => !l.blank).length;
   return { id, tiles: leaves.length, active: nonBlank, blank: leaves.length - nonBlank };
 }
@@ -469,8 +472,7 @@ async function buildFinalViewImage() {
     comps.push({ input: img, left: t.x, top: t.y });
   }
   const { imgW: iW = 1024, imgH: iH = 1024 } = state;
-  const bg = viewBackground === 'white' ? '#ffffff' : '#000000';
-  const base = sharp({ create: { width: iW, height: iH, channels: 3, background: bg } });
+  const base = sharp({ create: { width: iW, height: iH, channels: 3, background: viewBgColor || '#000000' } });
   return comps.length ? base.composite(comps).png().toBuffer() : base.png().toBuffer();
 }
 
@@ -517,7 +519,7 @@ function flushViewQueue() {
 function enqueueViewUpdate(msg) {
   if (viewMode === 'paused' || viewMode === 'hold') return;
   viewUpdateQueue.set(msg.tileId, msg); // newer submission overwrites older for same tile
-  if (!viewFlushTimer) viewFlushTimer = setTimeout(flushViewQueue, 1000);
+  if (!viewFlushTimer) viewFlushTimer = setTimeout(flushViewQueue, 200);
 }
 
 // schedule a view update: goes through the 20fps queue, with optional admin delay on top.
@@ -557,6 +559,7 @@ async function reblendAll() {
     scheduleViewUpdate(await liveTileUpdate(id, t));
     await new Promise(r => setImmediate(r));
   }
+  scheduleSeedRebuild(); // blend settings changed — all tiles rerendered
 }
 
 
@@ -625,6 +628,8 @@ app.post('/api/session', upload.single('image'), async (req, res) => {
     const pieces = parseInt(req.body.pieces, 10) || 64;
     const redundancy = parseInt(req.body.redundancy, 10) || 3;
     const includeSolidBlack = req.body.includeSolidBlack === 'true' || req.body.includeSolidBlack === true;
+    // Persist slice settings so admin UI restores them after a server restart
+    saveConfig({ ...getConfig(), defaultPieces: pieces, defaultIncludeSolidBlack: includeSolidBlack });
     const r = await slice(buffer, pieces, redundancy, includeSolidBlack);
     broadcastAdmins({ type: 'reset', ...adminState() });
     broadcastViews({ type: 'reset', ...viewInitData() });
@@ -654,7 +659,7 @@ app.post('/api/session/restart', (_, res) => {
     const j = Math.floor(Math.random() * (i + 1));
     [state.tileIds[i], state.tileIds[j]] = [state.tileIds[j], state.tileIds[i]];
   }
-  seedPngCache = null; // wipe immediately — canvas is blank after restart
+  seedPngCache = exportPngCache = null; // wipe — canvas is blank after restart
   broadcastPlayers({ type: 'resume' });
   broadcastAdmins({ type: 'reset', ...adminState() });
   broadcastViews({ type: 'reset', ...viewInitData() });
@@ -765,7 +770,8 @@ async function buildSeedPng() {
 
 // Invalidate immediately (view will wait on next request), then rebuild after quiet period
 function scheduleSeedRebuild(delay = 2000) {
-  seedPngCache = null;
+  seedPngCache   = null;
+  exportPngCache = null; // export and seed share the same invalidation events
   if (seedRebuildTimer) clearTimeout(seedRebuildTimer);
   seedRebuildTimer = setTimeout(() => { seedRebuildTimer = null; buildSeedPng().catch(console.error); }, delay);
 }
@@ -902,30 +908,39 @@ app.post('/api/tile/:id/clear', (req, res) => {
   broadcastStats();
   res.json({ ok: true });
 });
+// export.png cache — white-background full mosaic, used by admin panel and download button.
+// Same caching strategy as seed.png: build once, serve instantly, invalidate on tile changes.
+let exportPngCache = null;
+
+async function buildExportPng() {
+  if (!state) return null;
+  const comps = [];
+  for (const b of state.blanks) {
+    const v = b.fill ?? 255;
+    if (v < 250) {
+      const solidBuf = await sharp({ create: { width: b.sz, height: b.sz, channels: 3, background: { r: v, g: v, b: v } } }).png().toBuffer();
+      comps.push({ input: solidBuf, left: b.x, top: b.y });
+    }
+  }
+  for (const [id, t] of state.tiles) {
+    let buf = state.blendedPngs.get(id);
+    if (!buf) { const r = await blendTile(id); if (r) { buf = r; state.blendedPngs.set(id, r); } }
+    if (!buf) continue;
+    const img = await sharp(buf).resize(t.sz, t.sz, { fit: 'fill' }).toBuffer();
+    comps.push({ input: img, left: t.x, top: t.y });
+    await new Promise(r => setImmediate(r));
+  }
+  const { imgW: iW = 1024, imgH: iH = 1024 } = state;
+  return sharp({ create: { width: iW, height: iH, channels: 3, background: '#ffffff' } })
+    .composite(comps).png({ compressionLevel: 6 }).toBuffer();
+}
+
 app.get('/api/export.png', async (_, res) => {
   try {
     if (!state) return res.status(404).end();
-    const comps = [];
-    // blank tiles: composite any that aren't white
-    for (const b of state.blanks) {
-      const v = b.fill ?? 255;
-      if (v < 250) { // skip near-white blanks (canvas background handles those)
-        const solidBuf = await sharp({ create: { width: b.sz, height: b.sz, channels: 3, background: { r: v, g: v, b: v } } }).png().toBuffer();
-        comps.push({ input: solidBuf, left: b.x, top: b.y });
-      }
-    }
-    // submitted tiles
-    for (const [id, t] of state.tiles) {
-      let buf = state.blendedPngs.get(id);
-      if (!buf) { const r = await blendTile(id); if (r) { buf = r; state.blendedPngs.set(id, r); } }
-      if (!buf) continue;
-      const img = await sharp(buf).resize(t.sz, t.sz, { fit: 'fill' }).toBuffer();
-      comps.push({ input: img, left: t.x, top: t.y });
-    }
-    const { imgW: iW = 1024, imgH: iH = 1024 } = state;
-    const out = await sharp({ create: { width: iW, height: iH, channels: 3, background: '#ffffff' } })
-      .composite(comps).png().toBuffer();
-    res.type('png').send(out);
+    if (!exportPngCache) exportPngCache = await buildExportPng();
+    if (!exportPngCache) return res.status(500).end();
+    res.type('png').send(exportPngCache);
   } catch (e) { console.error(e); res.status(500).end(); }
 });
 
@@ -1044,6 +1059,7 @@ async function autoFillAndFinish(durationMs = 10000) {
   // Officially close the game once the fill animation is done
   setTimeout(async () => {
     if (state) state.autoFilling = false;
+    scheduleSeedRebuild(500); // auto-fill changed many tiles — rebuild seed
     await finishSession();
   }, durationMs + 300);
 }
@@ -1059,11 +1075,11 @@ function resumeSession() {
 }
 
 let viewMode        = 'live';
-let viewSidebar     = false;
-let viewBackground  = getConfig().viewBackground  || 'black';
+let viewBackground  = getConfig().viewBackground   || 'black';
 let viewSidebarWidth = getConfig().viewSidebarWidth || 27;
-let viewBgColor     = getConfig().viewBgColor     || '#000000';
-let viewTextColor   = getConfig().viewTextColor   || '#ffffff';
+let viewBgColor     = getConfig().viewBgColor      || '#000000';
+let viewTextColor   = getConfig().viewTextColor    || '#ffffff';
+let viewSidebar     = !!getConfig().viewSidebarOn; // persisted — survives restart
 
 // ── stats broadcast (throttled) ──────────────────────────────────────────────
 let _statsTimer = null;
@@ -1079,6 +1095,7 @@ function broadcastStats() {
 
 app.post('/api/view/sidebar', (req, res) => {
   viewSidebar = !!req.body.on;
+  saveConfig({ ...getConfig(), viewSidebarOn: viewSidebar });
   broadcastViews({ type: 'view-sidebar', on: viewSidebar });
   broadcastAdmins({ type: 'view-sidebar', on: viewSidebar });
   res.json({ ok: true, on: viewSidebar });
@@ -1180,6 +1197,7 @@ wss.on('connection', (ws, req) => {
     send({ type: 'view-background', bg: viewBackground });
     send({ type: 'view-sidebar-width', width: viewSidebarWidth });
     send({ type: 'view-colors', bg: viewBgColor, text: viewTextColor });
+    send({ type: 'view-sidebar', on: viewSidebar });
     ws.on('close', () => admins.delete(ws));
     return;
   }
@@ -1257,15 +1275,23 @@ wss.on('connection', (ws, req) => {
       return;
     }
     if (m.type === 'submit' && m.tileId && m.png && state && state.tiles.has(m.tileId)) {
-      // Basic server-side guards — validation detail lives on the client.
-      // 1) Rate limit: one accepted submission per player per 5 s.
-      //    Drawing takes ~30 s so this only blocks hammering bots.
+      // 1) Tile ownership — player must hold the tile they're submitting for.
+      //    Tech audiences will probe the WebSocket protocol; this closes that door.
+      if (m.tileId !== currentTileId) return;
+
+      // 2) Rate limit: one accepted submission per player per 5 s.
       const now = Date.now();
       if (ws._lastSubmit && now - ws._lastSubmit < 5000) return;
       ws._lastSubmit = now;
 
-      // 2) Payload size sanity (belt-and-suspenders on top of maxPayload).
+      // 3) Payload size sanity.
       if (typeof m.png !== 'string' || m.png.length > 350_000) return;
+
+      // 4) PNG magic byte check — rejects non-image payloads without a Sharp decode.
+      const rawBuf = Buffer.from(m.png.replace(/^data:[^;]+;base64,/, ''), 'base64');
+      if (rawBuf.length < 4 ||
+          rawBuf[0] !== 0x89 || rawBuf[1] !== 0x50 ||
+          rawBuf[2] !== 0x4e || rawBuf[3] !== 0x47) return; // not a PNG
 
       db.prepare('INSERT INTO submissions(id,tile,png,created) VALUES(?,?,?,?)')
         .run(randomUUID(), m.tileId, m.png, Date.now());
