@@ -152,6 +152,10 @@ function resize() {
   ctx.fillRect(0, 0, imgW, imgH);
   if (lastSeedImg) {
     ctx.drawImage(lastSeedImg, 0, 0, imgW, imgH); // instant — no network
+    // Repaint any tile-updates received after the seed was loaded
+    for (const [, entry] of tiles) {
+      if (entry.img) ctx.drawImage(entry.img, entry.x, entry.y, entry.sz, entry.sz);
+    }
   } else if (imgW > 0) {
     seedFromServer();
   }
@@ -163,8 +167,11 @@ function paintTile(id, x, y, sz, png) {
   const img   = new Image();
   img.onload = () => {
     if (!tiles.has(id)) return;
-    entry.img = img;
     ctx.drawImage(img, x, y, sz, sz);
+    // Keep a reference only for resize repainting.
+    // Once the seed cache catches up (view-sync clears tiles),
+    // this Image is released and the memory is freed.
+    entry.img = img;
   };
   img.src = png;
 }
@@ -219,9 +226,10 @@ function connect() {
     }
     else if (m.type === 'view-mode')   { document.getElementById('veil').classList.toggle('on', m.mode === 'paused'); }
     else if (m.type === 'view-sync')   {
-      tiles.clear();
       document.getElementById('veil').classList.remove('on');
-      // Keep existing canvas content visible while the new seed loads in the background
+      // Keep existing canvas visible while new seed loads.
+      // Clear tile image refs — seed will be the new ground truth.
+      tiles.clear();
       seedFromServer();
     }
     else if (m.type === 'view-sidebar') { setSidebar(m.on); }

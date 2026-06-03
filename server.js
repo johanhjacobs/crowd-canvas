@@ -1051,7 +1051,7 @@ async function autoFillAndFinish(durationMs = 10000) {
         state.submissionCounts.set(id, 1);
         state.autoFilledTiles.add(id);
         broadcastAdmins({ type: 'tile-update', tileId: id, x: t.x, y: t.y, sz: t.sz, png: dataUrl, subs: 1 });
-        broadcastViews({ type: 'tile-update', tileId: id, x: t.x, y: t.y, sz: t.sz, png: dataUrl });
+        enqueueViewUpdate({ type: 'tile-update', tileId: id, x: t.x, y: t.y, sz: t.sz, png: dataUrl });
       }
     }, Math.round(b * batchInterval));
   }
@@ -1102,9 +1102,9 @@ app.post('/api/view/sidebar', (req, res) => {
 });
 
 app.post('/api/view/background', (_, res) => {
-  // Flip: swap bg and text colors
   [viewBgColor, viewTextColor] = [viewTextColor, viewBgColor];
   saveConfig({ ...getConfig(), viewBgColor, viewTextColor });
+  invalidateFinalView(); // bg color changed — regenerate final image on next request
   const msg = { type: 'view-colors', bg: viewBgColor, text: viewTextColor };
   broadcastViews(msg);
   broadcastAdmins(msg);
@@ -1124,6 +1124,8 @@ app.post('/api/view/colors', (req, res) => {
   if (hex(req.body.bg))   { viewBgColor   = req.body.bg;   }
   if (hex(req.body.text)) { viewTextColor = req.body.text; }
   saveConfig({ ...getConfig(), viewBgColor, viewTextColor });
+  // Final view image bakes in the bg color — invalidate so next download uses new color
+  invalidateFinalView();
   const msg = { type: 'view-colors', bg: viewBgColor, text: viewTextColor };
   broadcastViews(msg);
   broadcastAdmins(msg);
