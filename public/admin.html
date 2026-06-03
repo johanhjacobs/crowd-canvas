@@ -419,11 +419,16 @@ function connect() {
       setGameDoneUI(false);
       updateStats();
     }
-    else if (m.type === 'done') {
-      document.getElementById('completeBanner').style.display = '';
+    else if (m.type === 'final-ready') {
       document.getElementById('exportBtn').textContent = 'Download final mosaic ↓';
       document.getElementById('exportBtn').style.background = 'var(--accent)';
       document.getElementById('exportBtn').style.color = '#fff';
+    }
+    else if (m.type === 'done') {
+      document.getElementById('completeBanner').style.display = '';
+      document.getElementById('exportBtn').textContent = 'Building final image…';
+      document.getElementById('exportBtn').style.background = '';
+      document.getElementById('exportBtn').style.color = '';
       setGameDoneUI(true);
       // re-fetch state so stats show the definitive final numbers
       fetch('/api/state').then(r => r.json()).then(s => {

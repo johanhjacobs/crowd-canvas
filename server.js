@@ -58,7 +58,6 @@ const DEFAULT_CONFIG = {
   similarityThreshold: 0.35, // recall threshold 0=off; 0.25 works well for most images
   maxStrayInk: 1.5,          // max ink in deep-white reference areas on a 32x32 grid
   minCoverage: 0.60,         // min fraction of the reference ink the player must cover (0=off)
-  viewBackground: 'black',   // big-screen default background: 'black' | 'white'
   viewSidebarWidth: 27,      // big-screen sidebar width as a % of screen width
   viewBgColor:   '#000000',  // free background colour for the view screen
   viewTextColor: '#ffffff',  // sidebar text / border colour
@@ -950,7 +949,7 @@ function adminState() {
   const cnt = new Map(subs.map(s => [s.tile, s.n]));
   return {
     active: true, done: state.done, size: state.size, redundancy: state.redundancy, imgW: state.imgW, imgH: state.imgH,
-    waitingCount: waiting.size, viewMode, viewDelay, viewBackground, viewSidebarWidth,
+    waitingCount: waiting.size, viewMode, viewDelay, viewSidebarWidth,
     tiles: [...state.tiles.values()].map(t => ({ id: t.id, x: t.x, y: t.y, sz: t.sz, subs: cnt.get(t.id) || 0 })),
     blanks: state.blanks,
   };
@@ -958,9 +957,9 @@ function adminState() {
 
 function viewInitData() {
   const colors = { bgColor: viewBgColor, textColor: viewTextColor };
-  if (!state) return { active: false, background: viewBackground, ...colors };
+  if (!state) return { active: false, ...colors };
   return { active: true, size: state.size, imgW: state.imgW, imgH: state.imgH,
-           blanks: state.blanks, sidebar: viewSidebar, background: viewBackground,
+           blanks: state.blanks, sidebar: viewSidebar,
            sidebarWidth: viewSidebarWidth, ...colors };
 }
 
@@ -993,17 +992,24 @@ const broadcastPlayers = o => bcast(players, o);
 // open the game: release all waiting players in batches to keep event loop responsive
 
 async function finishSession() {
-  if (!state) return;
-  if (state.done && finalViewPng) return;
+  if (!state || state.done) return;
   state.done = true;
   for (const t of pendingViewTimers.values()) clearTimeout(t);
   pendingViewTimers.clear();
-  await ensureFinalViewImage();
+
+  // Tell everyone immediately — don't make 20k phones wait 30 s for a 4K image build.
   broadcastAdmins({ type: 'done' });
-  broadcastViews({ type: 'view-sync' });
-  broadcastViews({ type: 'done' });
   broadcastPlayers({ type: 'done' });
   broadcastStats();
+
+  // Build final image in the background; update view and admin when ready.
+  ensureFinalViewImage()
+    .then(() => {
+      broadcastViews({ type: 'view-sync' });
+      broadcastViews({ type: 'done' });
+      broadcastAdmins({ type: 'final-ready' }); // admin can now enable download
+    })
+    .catch(console.error);
 }
 
 // Gradually fill all undrawn tiles with their reference images over durationMs,
@@ -1075,7 +1081,6 @@ function resumeSession() {
 }
 
 let viewMode        = 'live';
-let viewBackground  = getConfig().viewBackground   || 'black';
 let viewSidebarWidth = getConfig().viewSidebarWidth || 27;
 let viewBgColor     = getConfig().viewBgColor      || '#000000';
 let viewTextColor   = getConfig().viewTextColor    || '#ffffff';
@@ -1196,7 +1201,6 @@ wss.on('connection', (ws, req) => {
     admins.add(ws);
     send({ type: 'state', ...adminState() });
     send({ type: 'config', ...getConfig() });
-    send({ type: 'view-background', bg: viewBackground });
     send({ type: 'view-sidebar-width', width: viewSidebarWidth });
     send({ type: 'view-colors', bg: viewBgColor, text: viewTextColor });
     send({ type: 'view-sidebar', on: viewSidebar });
@@ -1209,7 +1213,6 @@ wss.on('connection', (ws, req) => {
     send({ type: 'init', ...viewInitData() });
     send({ type: 'view-mode', mode: viewMode });
     send({ type: 'view-sidebar', on: viewSidebar });
-    send({ type: 'view-background', bg: viewBackground });
     send({ type: 'view-sidebar-width', width: viewSidebarWidth });
     broadcastStats();
     ws.on('close', () => views.delete(ws));

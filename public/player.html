@@ -372,13 +372,23 @@ function connect() {
 }
 
 function showDone() {
-  const t = '?t=' + Date.now();
-  document.getElementById('finalThumb').src = '/api/final-view-thumb.png' + t; // small preview
-  document.getElementById('finalLink').href = '/api/final-view.png' + t;       // full-res download
   document.getElementById('waiting-screen').classList.remove('show');
   document.getElementById('done').classList.add('show');
   tileId = null;
   updateTileUI();
+  loadDoneThumb();
+}
+
+function loadDoneThumb() {
+  const t   = '?t=' + Date.now();
+  const img = document.getElementById('finalThumb');
+  const lnk = document.getElementById('finalLink');
+  lnk.href  = '/api/final-view.png' + t;
+  img.onerror = () => {
+    // Image still building on the server — retry every 3 s until it appears
+    setTimeout(loadDoneThumb, 3000);
+  };
+  img.src = '/api/final-view-thumb.png' + t;
 }
 
 function applyConfig(cfg) {
