@@ -256,9 +256,8 @@ async function slice(buffer, pieces, redundancy, includeSolidBlack = false) {
     }
   }
   loadActive();
-  // New session has zero submissions — accumulator rebuild is instant; call anyway
-  // so the Map exists and the code path is always consistent.
   rebuildAccumulatorsFromDB().catch(console.error);
+  seedPngCache = null; // new session — old cache is invalid
   const nonBlank = leaves.filter(l => !l.blank).length;
   return { id, tiles: leaves.length, active: nonBlank, blank: leaves.length - nonBlank };
 }
@@ -655,7 +654,8 @@ app.post('/api/session/restart', (_, res) => {
     const j = Math.floor(Math.random() * (i + 1));
     [state.tileIds[i], state.tileIds[j]] = [state.tileIds[j], state.tileIds[i]];
   }
-  broadcastPlayers({ type: 'resume' }); // players re-request a tile automatically
+  seedPngCache = null; // wipe immediately — canvas is blank after restart
+  broadcastPlayers({ type: 'resume' });
   broadcastAdmins({ type: 'reset', ...adminState() });
   broadcastViews({ type: 'reset', ...viewInitData() });
   broadcastViews({ type: 'view-sync' });
@@ -723,18 +723,26 @@ app.get('/api/overlay.png', async (_, res) => {
   } catch (e) { console.error(e); res.status(500).end(); }
 });
 
-// /api/seed.png — transparent background; drawn over the view's black canvas so
-// only submitted/blank tiles appear and undrawn areas stay black.
-// Much cheaper than sending thousands of base64 PNGs through a WebSocket.
-app.get('/api/seed.png', async (_, res) => {
+// ── seed.png cache ────────────────────────────────────────────────────────────
+// Building seed.png at full mosaic resolution (up to 4K = 3840×2160) is expensive:
+// it composites every tile via Sharp, which can take 10–30 s for 5000 tiles.
+// Solution: build it once asynchronously, cache in RAM, serve instantly.
+// Invalidated whenever tile content changes; rebuilt after a 2 s quiet period.
+let seedPngCache   = null;  // Buffer | null
+let seedBuilding   = false;
+let seedRebuildTimer = null;
+
+async function buildSeedPng() {
+  if (seedBuilding) return;
+  seedBuilding = true;
   try {
-    if (!state) return res.status(404).end();
+    if (!state) { seedPngCache = null; return; }
     const comps = [];
     for (const b of state.blanks) {
-      // snap to pure white or black — no grey on the view screen
-      // white blanks MUST be composited explicitly (canvas bg is black, transparent = black)
       const v = (b.fill ?? 255) > 127 ? 255 : 0;
-      const buf = await sharp({ create: { width: b.sz, height: b.sz, channels: 3, background: { r: v, g: v, b: v } } }).png().toBuffer();
+      const buf = await sharp({
+        create: { width: b.sz, height: b.sz, channels: 3, background: { r: v, g: v, b: v } }
+      }).png().toBuffer();
       comps.push({ input: buf, left: b.x, top: b.y });
     }
     for (const [id, t] of state.tiles) {
@@ -742,11 +750,32 @@ app.get('/api/seed.png', async (_, res) => {
       if (!buf) continue;
       const img = await sharp(buf).resize(t.sz, t.sz, { fit: 'fill' }).toBuffer();
       comps.push({ input: img, left: t.x, top: t.y });
+      await new Promise(r => setImmediate(r)); // yield to event loop between tiles
     }
     const { imgW: iW = 1024, imgH: iH = 1024 } = state;
-    const base = sharp({ create: { width: iW, height: iH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } });
-    const out = comps.length ? await base.composite(comps).png().toBuffer() : await base.png().toBuffer();
-    res.set('Cache-Control', 'no-store').type('png').send(out);
+    // Transparent base — composited over the view's background colour in the browser
+    const base = sharp({ create: { width: iW, height: iH, channels: 4, background: { r:0,g:0,b:0,alpha:0 } } });
+    seedPngCache = comps.length
+      ? await base.composite(comps).png({ compressionLevel: 6 }).toBuffer()
+      : await base.png().toBuffer();
+    console.log(`[seed] built ${(seedPngCache.length/1024).toFixed(0)} KB  (${iW}×${iH})`);
+  } catch (e) { console.error('[seed] build error', e); }
+  finally { seedBuilding = false; }
+}
+
+// Invalidate immediately (view will wait on next request), then rebuild after quiet period
+function scheduleSeedRebuild(delay = 2000) {
+  seedPngCache = null;
+  if (seedRebuildTimer) clearTimeout(seedRebuildTimer);
+  seedRebuildTimer = setTimeout(() => { seedRebuildTimer = null; buildSeedPng().catch(console.error); }, delay);
+}
+
+app.get('/api/seed.png', async (_, res) => {
+  try {
+    if (!state) return res.status(404).end();
+    if (!seedPngCache) await buildSeedPng();   // first-time or after invalidation
+    if (!seedPngCache) return res.status(500).end();
+    res.set('Cache-Control', 'no-store').type('png').send(seedPngCache);
   } catch (e) { console.error(e); res.status(500).end(); }
 });
 
@@ -846,6 +875,7 @@ app.post('/api/submission/:id/delete', (req, res) => {
       broadcastAdmins({ type: 'tile-cleared', tileId: sub.tile, x: t.x, y: t.y, sz: t.sz });
       broadcastViews({ type: 'tile-cleared', tileId: sub.tile, x: t.x, y: t.y, sz: t.sz }); // admin action — always immediate
     }
+    scheduleSeedRebuild(500); // admin action — rebuild quickly
     broadcastStats();
   }).catch(console.error);
 });
@@ -856,7 +886,8 @@ app.post('/api/tile/:id/clear', (req, res) => {
   state.submissionCounts.set(id, 0);
   state.blendedPngs.set(id, null);
   state.livePngs.set(id, null);
-  state.accumulators.delete(id); // reset so next submission starts fresh
+  state.accumulators.delete(id);
+  scheduleSeedRebuild(500); // admin action — rebuild quickly
   if (state.done) {
     state.done = false; // reopen the game if it had completed
     invalidateFinalView();
@@ -1265,7 +1296,8 @@ wss.on('connection', (ws, req) => {
         const update = { type: 'tile-update', tileId: m.tileId, x: t.x, y: t.y, sz: t.sz, png, subs: state.submissionCounts.get(m.tileId) || 0 };
         broadcastAdmins(update);
         scheduleViewUpdate(await liveTileUpdate(m.tileId, t));
-        broadcastStats(); // update sidebar coverage %
+        broadcastStats();
+        scheduleSeedRebuild(); // rebuild seed async after this batch settles
       }
 
       if (!state.done) {

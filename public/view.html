@@ -109,23 +109,32 @@ function applyViewColors(bg, text, { reseed = true } = {}) {
   document.getElementById('canvas-border').style.boxShadow = `0 0 40px ${text}0f`;
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  if (reseed && canvas.width > 0) seedFromServer();
+  if (lastSeedImg) {
+    ctx.drawImage(lastSeedImg, 0, 0, canvas.width, canvas.height); // instant restore
+  } else if (reseed && canvas.width > 0) {
+    seedFromServer();
+  }
   if (!sidebar.classList.contains('hidden')) refreshQR();
 }
 
 let imgW = 1024, imgH = 1024;
 const tiles = new Map();
+let lastSeedImg = null; // keep the last loaded seed image so resize never re-fetches
 
 function seedFromServer() {
   const img = new Image();
-  img.onload = () => { ctx.drawImage(img, 0, 0, canvas.width, canvas.height); };
+  img.onload = () => {
+    lastSeedImg = img;
+    // Draw over existing content — never clear first.
+    // The screen stays stable until the new seed is fully loaded.
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  };
   img.src = '/api/seed.png?t=' + Date.now();
 }
 
 function resize() {
   const hasSidebar = !sidebar.classList.contains('hidden');
   const sideW = hasSidebar ? sidebar.offsetWidth : 0;
-  // frame chrome (wrap padding 14 + border padding 6 + border 2) on both sides; 0 in full screen
   const chrome = hasSidebar ? (14 + 6 + 2) * 2 : 0;
   const avW   = window.innerWidth  - sideW - chrome;
   const avH   = window.innerHeight - chrome;
@@ -135,11 +144,17 @@ function resize() {
   else                     { cssW = avW; cssH = avW / aspect; }
   canvas.style.width  = cssW + 'px';
   canvas.style.height = cssH + 'px';
+  // Setting canvas.width clears the canvas — redraw from lastSeedImg immediately
+  // so the screen is never blank during a window resize.
   canvas.width  = imgW;
   canvas.height = imgH;
   ctx.fillStyle = bgFill;
   ctx.fillRect(0, 0, imgW, imgH);
-  if (imgW > 0) seedFromServer();
+  if (lastSeedImg) {
+    ctx.drawImage(lastSeedImg, 0, 0, imgW, imgH); // instant — no network
+  } else if (imgW > 0) {
+    seedFromServer();
+  }
 }
 
 function paintTile(id, x, y, sz, png) {
@@ -185,6 +200,7 @@ function connect() {
     const m = JSON.parse(ev.data);
     if (m.type === 'init' || m.type === 'reset') {
       tiles.clear();
+      lastSeedImg = null; // new session — don't restore old mosaic
       applyViewColors(m.bgColor || '#000000', m.textColor || '#ffffff', { reseed: false });
       if (m.sidebarWidth) sidebar.style.width = m.sidebarWidth + '%';
       if (!m.active) { ctx.fillStyle=bgFill; ctx.fillRect(0,0,imgW,imgH); return; }
@@ -202,7 +218,12 @@ function connect() {
       ctx.fillStyle = bgFill; ctx.fillRect(m.x, m.y, m.sz, m.sz);
     }
     else if (m.type === 'view-mode')   { document.getElementById('veil').classList.toggle('on', m.mode === 'paused'); }
-    else if (m.type === 'view-sync')   { tiles.clear(); document.getElementById('veil').classList.remove('on'); seedFromServer(); }
+    else if (m.type === 'view-sync')   {
+      tiles.clear();
+      document.getElementById('veil').classList.remove('on');
+      // Keep existing canvas content visible while the new seed loads in the background
+      seedFromServer();
+    }
     else if (m.type === 'view-sidebar') { setSidebar(m.on); }
     else if (m.type === 'view-colors') { applyViewColors(m.bg, m.text); }
     else if (m.type === 'view-sidebar-width') { sidebar.style.width = m.width + '%'; resize(); }
