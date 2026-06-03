@@ -124,6 +124,10 @@
       <input type="number" id="pieces" value="120" min="1" max="2000">
       <label>Players per piece</label>
       <input type="number" id="redundancy" value="3" min="1" max="20">
+      <label style="flex-direction:row;align-items:center;gap:8px;cursor:pointer;margin-top:2px;">
+        <input type="checkbox" id="includeSolid" style="width:auto;margin:0;cursor:pointer;">
+        Include solid black tiles
+      </label>
       <button class="btn" id="startBtn">Slice &amp; start</button>
       <div class="join" id="join">
         <label>Players join at</label>
@@ -145,6 +149,7 @@
         </div>
         <button class="btn ghost sm" id="exportBtn">Download mosaic ↓</button>
         <button class="btn ghost sm" id="stopBtn">Stop game now</button>
+        <button class="btn ghost sm" id="fillBtn">Finish &amp; fill remaining ↓</button>
         <button class="btn ghost sm" id="resumeBtn" style="display:none;">Resume game now</button>
       </div>
     </div>
@@ -281,6 +286,8 @@
 const mc = document.getElementById('mosaic').getContext('2d');
 mc.fillStyle='#000'; mc.fillRect(0,0,1024,1024);
 
+const EMPTY_TILE = '#e0e0e0'; // very light grey for active tiles that haven't been drawn yet
+
 let tilesMap = new Map(), mSize = 1024, totalActive = 0, drawn = 0, totalSubs = 0, targetRedundancy = 3;
 
 function paintTile(x, y, sz, png) {
@@ -312,9 +319,13 @@ function setIncompleteUI() {
   document.getElementById('exportBtn').style.color = '';
 }
 
-// show Stop while running, Resume once the game is stopped/finished
+// show Stop/Fill while running, Resume once the game is stopped/finished
 function setGameDoneUI(done) {
-  document.getElementById('stopBtn').style.display = done ? 'none' : '';
+  document.getElementById('stopBtn').style.display  = done ? 'none' : '';
+  document.getElementById('stopBtn').disabled       = false;
+  const fb = document.getElementById('fillBtn');
+  fb.style.display = done ? 'none' : '';
+  if (!done) { fb.textContent = 'Finish & fill remaining ↓'; fb.disabled = false; }
   document.getElementById('resumeBtn').style.display = done ? '' : 'none';
 }
 
@@ -392,7 +403,7 @@ function connect() {
       drawn = [...tilesMap.values()].filter(t => t.subs > 0).length;
       totalSubs = [...tilesMap.values()].reduce((a, t) => a + (t.subs || 0), 0);
       setIncompleteUI();
-      mc.fillStyle = '#000';
+      mc.fillStyle = EMPTY_TILE;
       mc.fillRect(m.x, m.y, m.sz, m.sz);
       updateStats();
     }
@@ -437,7 +448,19 @@ function connect() {
 }
 connect();
 
-function seedMosaic() { const img = new Image(); img.onload = () => mc.drawImage(img, 0, 0, mc.canvas.width, mc.canvas.height); img.src = '/api/export.png?t=' + Date.now(); }
+function seedMosaic() {
+  const img = new Image();
+  img.onload = () => {
+    mc.drawImage(img, 0, 0, mc.canvas.width, mc.canvas.height);
+    // The export image has a white background, making undrawn tiles look finished.
+    // Overpaint them with a light grey so "not drawn yet" is visually obvious.
+    mc.fillStyle = EMPTY_TILE;
+    for (const t of tilesMap.values()) {
+      if ((t.subs || 0) === 0) mc.fillRect(t.x, t.y, t.sz, t.sz);
+    }
+  };
+  img.src = '/api/export.png?t=' + Date.now();
+}
 
 function showReview(tiles) {
   // overlay image
@@ -475,6 +498,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   fd.append('image', f);
   fd.append('pieces', document.getElementById('pieces').value);
   fd.append('redundancy', document.getElementById('redundancy').value);
+  fd.append('includeSolidBlack', document.getElementById('includeSolid').checked);
   try {
     const r = await fetch('/api/session', { method: 'POST', body: fd });
     const j = await r.json();
@@ -494,6 +518,16 @@ document.getElementById('stopBtn').addEventListener('click', async () => {
   } finally {
     btn.textContent = 'Stop game now'; btn.disabled = false;
   }
+});
+document.getElementById('fillBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('fillBtn');
+  btn.textContent = 'Filling…'; btn.disabled = true;
+  document.getElementById('stopBtn').disabled = true;
+  try {
+    const r = await fetch('/api/session/auto-finish', { method: 'POST' });
+    if (!r.ok) { alert('Could not start fill'); btn.textContent = 'Finish & fill remaining ↓'; btn.disabled = false; }
+    // buttons reset when the WS 'done' message arrives via setGameDoneUI
+  } catch { btn.textContent = 'Finish & fill remaining ↓'; btn.disabled = false; }
 });
 document.getElementById('resumeBtn').addEventListener('click', async () => {
   const btn = document.getElementById('resumeBtn');

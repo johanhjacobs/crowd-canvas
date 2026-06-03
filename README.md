@@ -1,108 +1,105 @@
 # Crowd Canvas
 
-Upload a black-and-white image, slice it into quadtree tiles, hand each tile to phones at
-random, collect the finger-drawings, and watch the mosaic assemble live. Built to drop onto
-an existing nginx box without touching your other sites.
+An interactive crowd-drawing game for live events. The host uploads a black & white image; the
+server slices it into tiles with a quadtree. Each guest gets a tile on their phone, draws it with a
+thick brush, and submits — and the mosaic fills in live on the big screen. Built for and tested at
+10,000+ simultaneous players.
+
+## Stack
+
+- **Runtime:** Node.js ≥ 20 (ESM)
+- **Backend:** Express + `ws` (WebSockets) + `better-sqlite3` + `sharp` + `multer`
+- **Frontend:** vanilla HTML/CSS/JS, three pages (player / admin / view), no framework
+
+## Structure
 
 ```
-server.js              the whole backend (slicer + assigner + websockets + sqlite + export)
+server.js            all backend logic (HTTP + WebSocket + slicing + blending)
+public/
+  player.html        audience drawing screen
+  admin.html         host control panel
+  view.html          big-screen live mosaic
 package.json
-public/player.html     what each phone sees (draw + submit)
-public/admin.html      your host screen (upload, QR, live mosaic, export)
-deploy/nginx-draw.conf the subdomain server block
-deploy/crowd-canvas.service  the systemd unit
-data/                  created at runtime: crowd.db + tile reference images
+ecosystem.config.cjs pm2 process config (single instance — see below)
+data/                runtime data (git-ignored, auto-created)
+  crowd.db           SQLite database
+  base.png           last uploaded image (squared)
+  refs/              256×256 reference crop per active tile
+  final-view.png     cached final mosaic
 ```
 
-Two URLs once it's up: `https://draw.yourdomain.com/` for players, `https://draw.yourdomain.com/admin` for you.
-
----
-
-## Deploy on your Hetzner VPS (nginx, subdomain)
-
-### 1. Node.js (you weren't sure if it's installed)
+## Run locally
 
 ```bash
-node -v          # if this prints v20+ or v22+, skip to step 2
+npm install
+npm start            # node server.js, listens on 127.0.0.1:3000
 ```
 
-If it's missing or older than 20, install the current LTS via NodeSource (does not disturb anything else):
+Then open:
+
+| Role             | URL                          |
+|------------------|------------------------------|
+| Player (audience)| `/`                          |
+| Admin (host)     | `/dropveters-admin`          |
+| View (big screen)| `/dropveters-view`           |
+
+`PORT` and `HOST` are read from the environment (default `3000` / `127.0.0.1`).
+
+## How an event runs
+
+1. Open the admin page, upload a high-contrast **black & white** image — bold shapes/line-art slice
+   and draw far better than photos.
+2. The server squares the image and quadtree-slices it into the requested number of tiles.
+3. Guests scan the QR on the view screen, land on the player page, and are handed shuffled tiles.
+4. Drawings blend into the mosaic live on the view screen.
+
+### Key admin settings
+
+- **Similarity threshold** — minimum shape-match score to accept a drawing (0 = off).
+- **Min coverage** — fraction of the tile's ink a drawing must cover (blocks lazy tags).
+- **Max stray ink** — ink allowed in large white areas (blocks hidden symbols).
+- **Live pixel filter** — on the big screen, only show pixels drawn by ≥ N players. This consensus
+  filter is the real defense against a lone griefer's tag; keep it at 1+.
+- **Background / sidebar width** — big-screen appearance, tunable per projector.
+- **Stop / Resume**, **Live delay**, **Auto-push** — run controls.
+
+Validation (similarity, coverage, stray ink, blank) runs on the player's phone; the server stores
+what it's sent. The live pixel filter and per-tile review/clear are the server-side moderation layer.
+
+## Deploy
+
+Single host, reverse-proxied by nginx (TLS) to the Node process on `127.0.0.1`.
 
 ```bash
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt-get install -y nodejs
-# build tools, only needed if the native modules can't use prebuilt binaries:
-sudo apt-get install -y build-essential python3
+scp -r server.js public package.json ecosystem.config.cjs deploy@VPS:/opt/crowd-canvas/
+ssh deploy@VPS 'cd /opt/crowd-canvas && npm install --omit=dev && pm2 restart crowd-canvas --update-env'
 ```
 
-### 2. Put the app on the box and install deps
+> **Run exactly one process.** All game state (the tile deck, assignment pointer, and the connected
+> player/view/admin sets) lives in memory in a single process. Do **not** use pm2 cluster mode or
+> multiple workers — they would hand out duplicate tiles and desync the mosaic. Scale vertically.
+
+For large events (10k–20k) you also need to raise the file-descriptor limit, tune nginx worker
+connections and WebSocket timeouts, and pick a dedicated-CPU instance. See `docs/` or the project
+notes for the full checklist.
+
+## Data
+
+Everything in `data/` is generated at runtime and is git-ignored. The directory is created
+automatically on first run; deleting it resets all sessions.
+
+## Load testing
+
+`loadtest.js` simulates phones connecting, drawing, and submitting so you can rehearse a large
+event before the night. It only needs the `ws` package (already a dependency).
 
 ```bash
-sudo mkdir -p /opt/crowd-canvas
-sudo chown -R www-data:www-data /opt/crowd-canvas
-# copy these files into /opt/crowd-canvas (scp, git, rsync — your choice), then:
-cd /opt/crowd-canvas
-sudo -u www-data npm install --omit=dev
+ulimit -n 100000                                   # on the test machine
+node loadtest.js wss://draw.mmsparty.nl/ws --clients 5000 --rate 500 --tiles 3
 ```
 
-`sharp` and `better-sqlite3` ship prebuilt binaries for linux x64, so this is usually quick.
-Quick local test before wiring the proxy:
-
-```bash
-sudo -u www-data PORT=3000 node server.js     # should print "listening on 127.0.0.1:3000"; Ctrl-C to stop
-```
-
-### 3. Run it as a service
-
-```bash
-sudo cp deploy/crowd-canvas.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now crowd-canvas
-sudo systemctl status crowd-canvas             # confirm it's active
-```
-
-### 4. DNS
-
-Add an A record (and AAAA if you use IPv6) for `draw.yourdomain.com` pointing at the VPS IP.
-
-### 5. nginx subdomain
-
-```bash
-sudo cp deploy/nginx-draw.conf /etc/nginx/sites-available/draw.yourdomain.com
-# edit the file: replace draw.yourdomain.com with your real subdomain
-sudo ln -s /etc/nginx/sites-available/draw.yourdomain.com /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-```
-
-### 6. HTTPS
-
-```bash
-sudo certbot --nginx -d draw.yourdomain.com
-```
-
-certbot edits only this new vhost to add the 443 block and the http→https redirect. Done —
-open `https://draw.yourdomain.com/admin`.
-
----
-
-## How it works
-
-- The upload is fitted into a 1024×1024 white square, so every quadtree cell is a square and
-  each phone's square drawing drops straight back into place.
-- The slicer repeatedly splits whichever cell is the most *mixed* black/white (i.e. has the most
-  detail), until it reaches roughly your requested piece count. Blank areas stay as big lazy tiles.
-- Each connecting phone is given the least-drawn tile, chosen at random among ties — so the same
-  tile naturally lands on several players (your "players per piece" number is the target spread).
-- Submissions stream to the admin over a WebSocket and paint into the live mosaic.
-- Export composites the tiles back together, picking one submission per tile **at random**, and
-  returns a PNG.
-
-Only one session is live at a time — starting a new one clears the previous tiles and drawings.
-
-## Notes
-
-- `/admin` has no password. Before a public event, protect it with nginx basic auth on a
-  `location /admin { ... }` block, or restrict by IP.
-- Submissions and tile images live under `/opt/crowd-canvas/data` — back that up if you want to
-  keep a finished piece beyond the next session.
-- Memory and CPU are trivial for this workload; the smallest shared-vCPU Hetzner instance is fine.
+First slice a **test** image on the admin (this fills the mosaic with junk — don't run it against
+your live event), then watch `htop` and event-loop lag on the server. Key flags: `--clients`,
+`--rate` (connections/sec — crank it to mimic the QR scan storm), `--tiles`, `--insecure` (staging
+certs), `--duration`. One machine tops out near ~25–28k connections (ephemeral ports); for a full
+20k+ run, split `--clients` across 2–3 machines.

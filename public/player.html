@@ -468,7 +468,12 @@ function getSimilarityScore() {
   const cleanliness = maxStrayInk > 0
     ? clamp01(1 - spillOver / (maxStrayInk * 1.75))
     : (deepWhiteSpill > 0 ? 0 : 1);
-  const finalScore = clamp01(shapeScore * cleanliness);
+  // Match % = how much of the black you covered (recall), knocked down if you inked the
+  // white (cleanliness). Coverage is naturally ~100% for an honest trace on ANY tile —
+  // dense or sparse — and ~0 for a doodle, so this reads consistently and can't be
+  // inflated the way an IoU-based score gets inflated on low-detail tiles. Shape fidelity
+  // is still enforced: recall makes you cover the black, cleanliness makes you avoid white.
+  const finalScore = clamp01(recallScore * cleanliness);
 
   // blank = essentially nothing drawn (same intent as the old server-side check,
   // <0.5% inked). Enforced regardless of the similarity threshold.

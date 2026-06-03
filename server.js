@@ -113,12 +113,13 @@ function loadActive() {
             tileIds,       // shuffled order — never changes
             deckPos: 0,    // round-robin pointer into tileIds
             activeCount: new Map(), // tileId → how many players currently drawing it
+            autoFilledTiles: new Set(), // tiles filled by autoFillAndFinish — bypass live filter
           };
 }
 loadActive();
 
 // ── slicer ────────────────────────────────────────────────────────────────────
-async function slice(buffer, pieces, redundancy) {
+async function slice(buffer, pieces, redundancy, includeSolidBlack = false) {
   // measure original so we can preserve the aspect ratio
   const { width: origW, height: origH } = await sharp(buffer).metadata();
 
@@ -189,7 +190,7 @@ async function slice(buffer, pieces, redundancy) {
   // filtered tiles with thin lines (e.g. 3% dark pixels = valid content).
   leaves = leaves.map(c => {
     const dark = avgDark(c);
-    const isBlank = score(c) < 0.01 * c.sz;
+    const isBlank = score(c) < 0.01 * c.sz && !(includeSolidBlack && dark > 0.5);
     return { ...c, blank: isBlank ? 1 : 0, fill: Math.round((1 - dark) * 255) };
   });
 
@@ -317,6 +318,14 @@ async function getLiveTilePng(tileId) {
   if (!state || !state.tiles.has(tileId)) return null;
   const cached = state.livePngs.get(tileId);
   if (cached !== undefined) return cached;
+
+  // Auto-filled tiles should always show their reference image regardless of the
+  // live pixel filter (there are no real submissions to vote pixels into visibility).
+  if (state.autoFilledTiles.has(tileId)) {
+    const buf = state.blendedPngs.get(tileId) || null;
+    state.livePngs.set(tileId, buf);
+    return buf;
+  }
 
   const live = await renderLiveTilePng(tileId);
   state.livePngs.set(tileId, live);
@@ -459,7 +468,8 @@ app.post('/api/session', upload.single('image'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'no image' });
     const pieces = parseInt(req.body.pieces, 10) || 64;
     const redundancy = parseInt(req.body.redundancy, 10) || 3;
-    const r = await slice(req.file.buffer, pieces, redundancy);
+    const includeSolidBlack = req.body.includeSolidBlack === 'true' || req.body.includeSolidBlack === true;
+    const r = await slice(req.file.buffer, pieces, redundancy, includeSolidBlack);
     broadcastAdmins({ type: 'reset', ...adminState() });
     broadcastViews({ type: 'reset', ...viewInitData() });
     res.json(r);
@@ -478,6 +488,16 @@ app.post('/api/session/resume', (_, res) => {
   if (!state) return res.status(404).json({ error: 'no active session' });
   resumeSession();
   res.json({ ok: true });
+});
+
+app.post('/api/session/auto-finish', async (req, res) => {
+  if (!state) return res.status(404).json({ error: 'no session' });
+  if (state.done) return res.status(400).json({ error: 'already done' });
+  if (state.autoFilling) return res.status(400).json({ error: 'auto-fill already running' });
+  const duration = Math.max(1000, Math.min(60000, parseInt(req.body?.duration, 10) || 10000));
+  const unfilled = [...state.tiles.keys()].filter(id => (state.submissionCounts.get(id) || 0) === 0).length;
+  autoFillAndFinish(duration).catch(console.error);
+  res.json({ ok: true, filling: unfilled, duration });
 });
 
 // /api/overlay.png — original image with tile boundaries drawn on top.
@@ -731,6 +751,63 @@ async function finishSession() {
   broadcastViews({ type: 'done' });
   broadcastPlayers({ type: 'done' });
   broadcastStats();
+}
+
+// Gradually fill all undrawn tiles with their reference images over durationMs,
+// then call finishSession(). Gives the big screen a smooth animated reveal.
+// Tiles are processed in small batches to avoid spiking memory and the event loop.
+async function autoFillAndFinish(durationMs = 10000) {
+  if (!state || state.done || state.autoFilling) return;
+  state.autoFilling = true;
+
+  // Only fill tiles that have never been submitted
+  const remaining = [];
+  for (const [id, t] of state.tiles) {
+    if ((state.submissionCounts.get(id) || 0) === 0) remaining.push({ id, t });
+  }
+
+  if (!remaining.length) {
+    state.autoFilling = false;
+    await finishSession();
+    return;
+  }
+
+  // Shuffle for a scattered organic fill rather than top-left → bottom-right
+  for (let i = remaining.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
+  }
+
+  // Process in small batches: load each ref image only when its batch fires,
+  // so we never hold thousands of image buffers in memory at once.
+  const BATCH = 5;                          // tiles per tick
+  const totalBatches = Math.ceil(remaining.length / BATCH);
+  const batchInterval = durationMs / totalBatches;
+
+  for (let b = 0; b < totalBatches; b++) {
+    setTimeout(async () => {
+      if (!state) return;
+      const slice = remaining.slice(b * BATCH, (b + 1) * BATCH);
+      for (const { id, t } of slice) {
+        let buf;
+        try { buf = await fs.promises.readFile(path.join(REFS, id + '.png')); }
+        catch { continue; }
+        const dataUrl = 'data:image/png;base64,' + buf.toString('base64');
+        state.blendedPngs.set(id, buf);
+        state.livePngs.set(id, buf);
+        state.submissionCounts.set(id, 1);
+        state.autoFilledTiles.add(id);
+        broadcastAdmins({ type: 'tile-update', tileId: id, x: t.x, y: t.y, sz: t.sz, png: dataUrl, subs: 1 });
+        broadcastViews({ type: 'tile-update', tileId: id, x: t.x, y: t.y, sz: t.sz, png: dataUrl });
+      }
+    }, Math.round(b * batchInterval));
+  }
+
+  // Officially close the game once the fill animation is done
+  setTimeout(async () => {
+    if (state) state.autoFilling = false;
+    await finishSession();
+  }, durationMs + 300);
 }
 
 // reopen a stopped/finished game: clear the final image and pull players back in
