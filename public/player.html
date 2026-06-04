@@ -153,8 +153,8 @@
 <div id="done">
   <h2>Thank you!</h2>
   <p>The final mosaic is ready.<br>Tap it to download the full version.</p>
-  <a id="finalLink" href="/api/final-view.png" download="crowd-canvas.png">
-    <img id="finalThumb" src="/api/final-view-thumb.png" alt="Final mosaic">
+  <a id="finalLink" href="/api/export.png" download="crowd-canvas.png">
+    <img id="finalThumb" src="/api/export-thumb.png" alt="Final mosaic">
     <span>Download full image</span>
   </a>
 </div>
@@ -383,12 +383,12 @@ function loadDoneThumb() {
   const t   = '?t=' + Date.now();
   const img = document.getElementById('finalThumb');
   const lnk = document.getElementById('finalLink');
-  lnk.href  = '/api/final-view.png' + t;
+  lnk.href  = '/api/export.png' + t;
   img.onerror = () => {
     // Image still building on the server — retry every 3 s until it appears
     setTimeout(loadDoneThumb, 3000);
   };
-  img.src = '/api/final-view-thumb.png' + t;
+  img.src = '/api/export-thumb.png' + t;
 }
 
 function applyConfig(cfg) {

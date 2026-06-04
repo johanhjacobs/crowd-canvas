@@ -175,7 +175,9 @@
       <label style="margin-top:14px;">Big screen colors</label>
       <div class="row">
         <div><label>Background</label><input type="color" id="vcBgColor" value="#000000"></div>
-        <div><label>Foreground</label><input type="color" id="vcTextColor" value="#ffffff"></div>
+        <div><label>Text</label><input type="color" id="vcTextColor" value="#ffffff"></div>
+        <div><label>Paper</label><input type="color" id="vcPaperColor" value="#ffffff"></div>
+        <div><label>Ink</label><input type="color" id="vcInkColor" value="#000000"></div>
       </div>
     </div>
 
@@ -293,7 +295,7 @@
 const mc = document.getElementById('mosaic').getContext('2d');
 mc.fillStyle='#000'; mc.fillRect(0,0,1024,1024);
 
-const EMPTY_TILE = '#e0e0e0'; // very light grey for active tiles that haven't been drawn yet
+let emptyTileColor = '#e0e0e0'; // colour for active tiles that haven't been drawn yet
 
 let tilesMap = new Map(), mSize = 1024, totalActive = 0, drawn = 0, totalSubs = 0, targetRedundancy = 3;
 
@@ -394,7 +396,7 @@ function connect() {
       btn.classList.toggle('active-live', m.on);
       btn.title = m.on ? 'Sidebar is ON — click to hide' : 'Toggle stats sidebar on big screen';
     }
-    else if (m.type === 'view-colors') { applyViewColorsAdmin(m.bg, m.text); }
+    else if (m.type === 'view-colors') { applyViewColorsAdmin(m.bg, m.text, m.tile, m.ink, m.paper); }
     else if (m.type === 'view-sidebar-width') { setSidebarWidthUI(m.width); }
     else if (m.type === 'player-count') {
       document.getElementById('nOnline').textContent = m.count.toLocaleString();
@@ -410,7 +412,7 @@ function connect() {
       drawn = [...tilesMap.values()].filter(t => t.subs > 0).length;
       totalSubs = [...tilesMap.values()].reduce((a, t) => a + (t.subs || 0), 0);
       setIncompleteUI();
-      mc.fillStyle = EMPTY_TILE;
+      mc.fillStyle = emptyTileColor;
       mc.fillRect(m.x, m.y, m.sz, m.sz);
       updateStats();
     }
@@ -466,7 +468,7 @@ function seedMosaic() {
     mc.drawImage(img, 0, 0, mc.canvas.width, mc.canvas.height);
     // The export image has a white background, making undrawn tiles look finished.
     // Overpaint them with a light grey so "not drawn yet" is visually obvious.
-    mc.fillStyle = EMPTY_TILE;
+    mc.fillStyle = emptyTileColor;
     for (const t of tilesMap.values()) {
       if ((t.subs || 0) === 0) mc.fillRect(t.x, t.y, t.sz, t.sz);
     }
@@ -577,7 +579,8 @@ document.getElementById('resumeBtn').addEventListener('click', async () => {
 function applyConfigUI(cfg) {
   if (cfg.defaultPieces !== undefined) document.getElementById('pieces').value = cfg.defaultPieces;
   if (cfg.defaultIncludeSolidBlack !== undefined) document.getElementById('includeSolid').checked = !!cfg.defaultIncludeSolidBlack;
-  if (cfg.viewBgColor || cfg.viewTextColor) applyViewColorsAdmin(cfg.viewBgColor, cfg.viewTextColor);
+  if (cfg.viewBgColor || cfg.viewTextColor || cfg.viewTileColor || cfg.viewInkColor || cfg.viewPaperColor)
+    applyViewColorsAdmin(cfg.viewBgColor, cfg.viewTextColor, cfg.viewTileColor, cfg.viewInkColor, cfg.viewPaperColor);
   if (cfg.inkColor)    document.getElementById('cInk').value    = cfg.inkColor;
   if (cfg.paperColor)  document.getElementById('cPaper').value  = cfg.paperColor;
   if (cfg.canvasColor) document.getElementById('cCanvas').value = cfg.canvasColor;
@@ -678,17 +681,30 @@ document.getElementById('sidebarWidthSlider').addEventListener('change', functio
   fetch('/api/view/sidebar-width', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({width: +this.value}) });
 });
 
-function applyViewColorsAdmin(bg, text) {
-  document.getElementById('vcBgColor').value   = bg   || '#000000';
-  document.getElementById('vcTextColor').value = text || '#ffffff';
+function applyViewColorsAdmin(bg, text, tile, ink, paper) {
+  if (bg)    document.getElementById('vcBgColor').value    = bg;
+  if (text)  document.getElementById('vcTextColor').value  = text;
+  // paper picker controls both empty-tile color and drawn-tile paper color
+  const p = paper || tile;
+  if (p)  { document.getElementById('vcPaperColor').value = p; emptyTileColor = p; }
+  if (ink)   document.getElementById('vcInkColor').value   = ink;
 }
 function pushViewColors() {
+  const paper = document.getElementById('vcPaperColor').value;
   fetch('/api/view/colors', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ bg: document.getElementById('vcBgColor').value,
-                           text: document.getElementById('vcTextColor').value }) });
+    body: JSON.stringify({ bg:    document.getElementById('vcBgColor').value,
+                           text:  document.getElementById('vcTextColor').value,
+                           tile:  paper,   // empty-tile color = paper color
+                           ink:   document.getElementById('vcInkColor').value,
+                           paper: paper }) });
 }
 document.getElementById('vcBgColor').addEventListener('input', pushViewColors);
 document.getElementById('vcTextColor').addEventListener('input', pushViewColors);
+document.getElementById('vcPaperColor').addEventListener('input', () => {
+  emptyTileColor = document.getElementById('vcPaperColor').value;
+  pushViewColors();
+});
+document.getElementById('vcInkColor').addEventListener('input', pushViewColors);
 
 // ── auto-push ─────────────────────────────────────────────────────────────────
 let apTimer = null, apCountdown = 0, apSecs = 0;

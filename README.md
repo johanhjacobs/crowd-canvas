@@ -21,9 +21,11 @@ public/
   view.html          big-screen live mosaic
 package.json
 ecosystem.config.cjs pm2 process config (single instance — see below)
+loadtest.js          load-test script (simulates phones)
 data/                runtime data (git-ignored, auto-created)
   crowd.db           SQLite database
-  base.png           last uploaded image (squared)
+  original.png       last uploaded image (grayscale, preserved for re-slicing)
+  base.png           squared/padded version used for tile extraction
   refs/              256×256 reference crop per active tile
   final-view.png     cached final mosaic
 ```
@@ -43,7 +45,8 @@ Then open:
 | Admin (host)     | `/dropveters-admin`          |
 | View (big screen)| `/dropveters-view`           |
 
-`PORT` and `HOST` are read from the environment (default `3000` / `127.0.0.1`).
+`PORT` and `HOST` are read from the environment (defaults `3000` / `127.0.0.1`).
+When run via pm2 (`ecosystem.config.cjs`) the port is `3100`.
 
 ## How an event runs
 
@@ -60,11 +63,16 @@ Then open:
 - **Max stray ink** — ink allowed in large white areas (blocks hidden symbols).
 - **Live pixel filter** — on the big screen, only show pixels drawn by ≥ N players. This consensus
   filter is the real defense against a lone griefer's tag; keep it at 1+.
+- **Blend mode** — `blend` (gamma-curved average, default), `first`, or `random`.
 - **Background / sidebar width** — big-screen appearance, tunable per projector.
-- **Stop / Resume**, **Live delay**, **Auto-push** — run controls.
+- **Stop / Resume**, **Restart**, **Live delay**, **Hold/Blank**, **Auto-fill & finish** — run controls.
 
 Validation (similarity, coverage, stray ink, blank) runs on the player's phone; the server stores
 what it's sent. The live pixel filter and per-tile review/clear are the server-side moderation layer.
+
+**Restart** wipes all submissions and reshuffles the deck without re-uploading the image.  
+**Auto-fill & finish** gradually fills any undrawn tiles with their reference images over a
+configurable duration (1–60 s) for a smooth animated reveal, then closes the game.
 
 ## Deploy
 
@@ -80,8 +88,8 @@ ssh deploy@VPS 'cd /opt/crowd-canvas && npm install --omit=dev && pm2 restart cr
 > multiple workers — they would hand out duplicate tiles and desync the mosaic. Scale vertically.
 
 For large events (10k–20k) you also need to raise the file-descriptor limit, tune nginx worker
-connections and WebSocket timeouts, and pick a dedicated-CPU instance. See `docs/` or the project
-notes for the full checklist.
+connections and WebSocket timeouts, and pick a dedicated-CPU instance. See `DEPLOY.md` for the
+full step-by-step runbook including sysctl tuning, TLS setup, and a load-test plan.
 
 ## Data
 

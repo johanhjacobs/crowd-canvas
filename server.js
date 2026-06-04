@@ -61,6 +61,9 @@ const DEFAULT_CONFIG = {
   viewSidebarWidth: 27,      // big-screen sidebar width as a % of screen width
   viewBgColor:   '#000000',  // free background colour for the view screen
   viewTextColor: '#ffffff',  // sidebar text / border colour
+  viewTileColor:  '#000000', // colour of empty (undrawn) tiles on the view screen
+  viewInkColor:   '#000000', // colour mapped to the darkest pixel in drawn tiles
+  viewPaperColor: '#ffffff', // colour mapped to the lightest pixel in drawn tiles
   viewSidebarOn: false,      // whether the sidebar is visible on the big screen
   defaultPieces: 120,        // last-used slice piece count — restored in admin UI
   defaultIncludeSolidBlack: false, // last-used includeSolidBlack flag
@@ -458,22 +461,40 @@ async function rebuildLivePngs() {
 
 async function buildFinalViewImage() {
   if (!state) return null;
+  const { imgW: iW = 1024, imgH: iH = 1024 } = state;
   const comps = [];
   for (const b of state.blanks) {
+    if (b.x >= iW || b.y >= iH) continue; // skip padding-area blanks
     const v = (b.fill ?? 255) > 127 ? 255 : 0;
     const buf = await sharp({ create: { width: b.sz, height: b.sz, channels: 3, background: { r: v, g: v, b: v } } }).png().toBuffer();
     comps.push({ input: buf, left: b.x, top: b.y });
   }
   for (const [id, t] of state.tiles) {
+    if (t.x >= iW || t.y >= iH) continue; // skip padding-area tiles
     const buf = await getLiveTilePng(id);
     if (!buf) continue;
     const img = await sharp(buf).resize(t.sz, t.sz, { fit: 'fill' }).toBuffer();
     comps.push({ input: img, left: t.x, top: t.y });
   }
-  const { imgW: iW = 1024, imgH: iH = 1024 } = state;
   const base = sharp({ create: { width: iW, height: iH, channels: 3, background: viewBgColor || '#000000' } });
-  return comps.length ? base.composite(comps).png().toBuffer() : base.png().toBuffer();
+  const composite = await (comps.length ? base.composite(comps).png().toBuffer() : base.png().toBuffer());
+  // resize to original image dimensions
+  const origPath = path.join(DATA, 'original.png');
+  if (fs.existsSync(origPath)) {
+    const { width: origW, height: origH } = await sharp(origPath).metadata();
+    if (origW && origH && (origW !== iW || origH !== iH)) {
+      return sharp(composite).resize(origW, origH, { fit: 'fill' }).png().toBuffer();
+    }
+  }
+  return composite;
 }
+
+// Promise locks — at most one build of each image type runs at a time.
+// Without this, 20k phones requesting the thumb simultaneously would each
+// start their own buildExportPng(), spiking CPU and memory.
+let _finalViewBuilding = null;
+let _exportBuilding    = null;
+let exportThumbCache   = null;
 
 async function ensureFinalViewImage() {
   if (finalViewPng) return finalViewPng;
@@ -481,11 +502,40 @@ async function ensureFinalViewImage() {
     finalViewPng = fs.readFileSync(FINAL_VIEW);
     return finalViewPng;
   }
-  const out = await buildFinalViewImage();
-  if (!out) return null;
-  fs.writeFileSync(FINAL_VIEW, out);
-  finalViewPng = out;
-  return finalViewPng;
+  if (!_finalViewBuilding) {
+    _finalViewBuilding = buildFinalViewImage()
+      .then(out => {
+        _finalViewBuilding = null;
+        if (!out) return null;
+        fs.writeFileSync(FINAL_VIEW, out);
+        finalViewPng = out;
+        return out;
+      })
+      .catch(e => { _finalViewBuilding = null; throw e; });
+  }
+  return _finalViewBuilding;
+}
+
+async function ensureExportPng() {
+  if (exportPngCache) return exportPngCache;
+  if (!_exportBuilding) {
+    _exportBuilding = buildExportPng()
+      .then(out => {
+        _exportBuilding = null;
+        exportPngCache = out;
+        return out;
+      })
+      .catch(e => { _exportBuilding = null; throw e; });
+  }
+  return _exportBuilding;
+}
+
+async function ensureExportThumb() {
+  if (exportThumbCache) return exportThumbCache;
+  const full = await ensureExportPng();
+  if (!full) return null;
+  exportThumbCache = await sharp(full).resize({ width: 512, withoutEnlargement: true }).png().toBuffer();
+  return exportThumbCache;
 }
 
 // small preview (≤512px) for the done screen so 20k phones don't each pull the full image
@@ -769,8 +819,9 @@ async function buildSeedPng() {
 
 // Invalidate immediately (view will wait on next request), then rebuild after quiet period
 function scheduleSeedRebuild(delay = 2000) {
-  seedPngCache   = null;
-  exportPngCache = null; // export and seed share the same invalidation events
+  seedPngCache    = null;
+  exportPngCache  = null; // export and seed share the same invalidation events
+  exportThumbCache = null;
   if (seedRebuildTimer) clearTimeout(seedRebuildTimer);
   seedRebuildTimer = setTimeout(() => { seedRebuildTimer = null; buildSeedPng().catch(console.error); }, delay);
 }
@@ -913,33 +964,52 @@ let exportPngCache = null;
 
 async function buildExportPng() {
   if (!state) return null;
+  const { imgW: iW = 1024, imgH: iH = 1024 } = state;
   const comps = [];
   for (const b of state.blanks) {
-    const v = b.fill ?? 255;
-    if (v < 250) {
-      const solidBuf = await sharp({ create: { width: b.sz, height: b.sz, channels: 3, background: { r: v, g: v, b: v } } }).png().toBuffer();
-      comps.push({ input: solidBuf, left: b.x, top: b.y });
-    }
+    if (b.x >= iW || b.y >= iH) continue; // skip padding-area blanks
+    const v = (b.fill ?? 255) > 127 ? 255 : 0; // fill: 255=white area, 0=black area
+    if (v === 255) continue; // white blank → white base already covers it
+    const solidBuf = await sharp({ create: { width: b.sz, height: b.sz, channels: 3, background: { r: v, g: v, b: v } } }).png().toBuffer();
+    comps.push({ input: solidBuf, left: b.x, top: b.y });
   }
   for (const [id, t] of state.tiles) {
+    if (t.x >= iW || t.y >= iH) continue; // skip padding-area tiles
     let buf = state.blendedPngs.get(id);
     if (!buf) { const r = await blendTile(id); if (r) { buf = r; state.blendedPngs.set(id, r); } }
-    if (!buf) continue;
+    if (!buf) continue; // undrawn → stays white (background)
     const img = await sharp(buf).resize(t.sz, t.sz, { fit: 'fill' }).toBuffer();
     comps.push({ input: img, left: t.x, top: t.y });
     await new Promise(r => setImmediate(r));
   }
-  const { imgW: iW = 1024, imgH: iH = 1024 } = state;
-  return sharp({ create: { width: iW, height: iH, channels: 3, background: '#ffffff' } })
+  const composite = await sharp({ create: { width: iW, height: iH, channels: 3, background: '#ffffff' } })
     .composite(comps).png({ compressionLevel: 6 }).toBuffer();
+  // resize to original image dimensions so the download matches the uploaded file's shape
+  const origPath = path.join(DATA, 'original.png');
+  if (fs.existsSync(origPath)) {
+    const { width: origW, height: origH } = await sharp(origPath).metadata();
+    if (origW && origH && (origW !== iW || origH !== iH)) {
+      return sharp(composite).resize(origW, origH, { fit: 'fill' }).png({ compressionLevel: 6 }).toBuffer();
+    }
+  }
+  return composite;
 }
 
 app.get('/api/export.png', async (_, res) => {
   try {
     if (!state) return res.status(404).end();
-    if (!exportPngCache) exportPngCache = await buildExportPng();
-    if (!exportPngCache) return res.status(500).end();
-    res.type('png').send(exportPngCache);
+    const buf = await ensureExportPng();
+    if (!buf) return res.status(500).end();
+    res.type('png').send(buf);
+  } catch (e) { console.error(e); res.status(500).end(); }
+});
+
+app.get('/api/export-thumb.png', async (_, res) => {
+  try {
+    if (!state) return res.status(404).end();
+    const buf = await ensureExportThumb();
+    if (!buf) return res.status(500).end();
+    res.set('Cache-Control', 'no-store').type('png').send(buf);
   } catch (e) { console.error(e); res.status(500).end(); }
 });
 
@@ -956,7 +1026,7 @@ function adminState() {
 }
 
 function viewInitData() {
-  const colors = { bgColor: viewBgColor, textColor: viewTextColor };
+  const colors = { bgColor: viewBgColor, textColor: viewTextColor, tileColor: viewTileColor, inkColor: viewInkColor, paperColor: viewPaperColor };
   if (!state) return { active: false, ...colors };
   return { active: true, size: state.size, imgW: state.imgW, imgH: state.imgH,
            blanks: state.blanks, sidebar: viewSidebar,
@@ -1002,12 +1072,17 @@ async function finishSession() {
   broadcastPlayers({ type: 'done' });
   broadcastStats();
 
-  // Build final image in the background; update view and admin when ready.
-  ensureFinalViewImage()
+  // Build everything sequentially — never concurrently — to avoid Sharp memory spikes.
+  // Order matters: export first (players need it), then seed (view-sync requires it),
+  // then final-view. Only broadcast view-sync once seed is actually ready.
+  ensureExportPng()
+    .then(() => ensureExportThumb())
+    .then(() => buildSeedPng())          // seed must be complete before view-sync
+    .then(() => ensureFinalViewImage())
     .then(() => {
-      broadcastViews({ type: 'view-sync' });
+      broadcastViews({ type: 'view-sync' }); // view now loads the complete seed
       broadcastViews({ type: 'done' });
-      broadcastAdmins({ type: 'final-ready' }); // admin can now enable download
+      broadcastAdmins({ type: 'final-ready' });
     })
     .catch(console.error);
 }
@@ -1062,10 +1137,12 @@ async function autoFillAndFinish(durationMs = 10000) {
     }, Math.round(b * batchInterval));
   }
 
-  // Officially close the game once the fill animation is done
+  // Officially close the game once the fill animation is done.
+  // Do NOT call scheduleSeedRebuild — finishSession rebuilds seed, export, and
+  // final-view in sequence, preventing concurrent Sharp spikes.
   setTimeout(async () => {
     if (state) state.autoFilling = false;
-    scheduleSeedRebuild(500); // auto-fill changed many tiles — rebuild seed
+    seedPngCache = exportPngCache = exportThumbCache = null; // invalidate stale caches
     await finishSession();
   }, durationMs + 300);
 }
@@ -1084,6 +1161,9 @@ let viewMode        = 'live';
 let viewSidebarWidth = getConfig().viewSidebarWidth || 27;
 let viewBgColor     = getConfig().viewBgColor      || '#000000';
 let viewTextColor   = getConfig().viewTextColor    || '#ffffff';
+let viewTileColor   = getConfig().viewTileColor    || '#000000';
+let viewInkColor    = getConfig().viewInkColor     || '#000000';
+let viewPaperColor  = getConfig().viewPaperColor   || '#ffffff';
 let viewSidebar     = !!getConfig().viewSidebarOn; // persisted — survives restart
 
 // ── stats broadcast (throttled) ──────────────────────────────────────────────
@@ -1108,12 +1188,12 @@ app.post('/api/view/sidebar', (req, res) => {
 
 app.post('/api/view/background', (_, res) => {
   [viewBgColor, viewTextColor] = [viewTextColor, viewBgColor];
-  saveConfig({ ...getConfig(), viewBgColor, viewTextColor });
+  saveConfig({ ...getConfig(), viewBgColor, viewTextColor, viewTileColor, viewInkColor, viewPaperColor });
   invalidateFinalView(); // bg color changed — regenerate final image on next request
-  const msg = { type: 'view-colors', bg: viewBgColor, text: viewTextColor };
+  const msg = { type: 'view-colors', bg: viewBgColor, text: viewTextColor, tile: viewTileColor, ink: viewInkColor, paper: viewPaperColor };
   broadcastViews(msg);
   broadcastAdmins(msg);
-  res.json({ ok: true, bg: viewBgColor, text: viewTextColor });
+  res.json({ ok: true, bg: viewBgColor, text: viewTextColor, tile: viewTileColor, ink: viewInkColor, paper: viewPaperColor });
 });
 
 app.post('/api/view/sidebar-width', (req, res) => {
@@ -1128,13 +1208,16 @@ app.post('/api/view/colors', (req, res) => {
   const hex = v => /^#[0-9a-f]{6}$/i.test(v) ? v : null;
   if (hex(req.body.bg))   { viewBgColor   = req.body.bg;   }
   if (hex(req.body.text)) { viewTextColor = req.body.text; }
-  saveConfig({ ...getConfig(), viewBgColor, viewTextColor });
+  if (hex(req.body.tile))  { viewTileColor  = req.body.tile;  }
+  if (hex(req.body.ink))   { viewInkColor   = req.body.ink;   }
+  if (hex(req.body.paper)) { viewPaperColor = req.body.paper; }
+  saveConfig({ ...getConfig(), viewBgColor, viewTextColor, viewTileColor, viewInkColor, viewPaperColor });
   // Final view image bakes in the bg color — invalidate so next download uses new color
-  invalidateFinalView();
-  const msg = { type: 'view-colors', bg: viewBgColor, text: viewTextColor };
+  if (hex(req.body.bg)) invalidateFinalView();
+  const msg = { type: 'view-colors', bg: viewBgColor, text: viewTextColor, tile: viewTileColor, ink: viewInkColor, paper: viewPaperColor };
   broadcastViews(msg);
   broadcastAdmins(msg);
-  res.json({ ok: true, bg: viewBgColor, text: viewTextColor });
+  res.json({ ok: true, bg: viewBgColor, text: viewTextColor, tile: viewTileColor, ink: viewInkColor, paper: viewPaperColor });
 });
 
 app.post('/api/view/delay', (req, res) => {  viewDelay = Math.max(0, Math.min(120, parseInt(req.body.delay, 10) || 0));
@@ -1202,7 +1285,7 @@ wss.on('connection', (ws, req) => {
     send({ type: 'state', ...adminState() });
     send({ type: 'config', ...getConfig() });
     send({ type: 'view-sidebar-width', width: viewSidebarWidth });
-    send({ type: 'view-colors', bg: viewBgColor, text: viewTextColor });
+    send({ type: 'view-colors', bg: viewBgColor, text: viewTextColor, tile: viewTileColor, ink: viewInkColor, paper: viewPaperColor });
     send({ type: 'view-sidebar', on: viewSidebar });
     ws.on('close', () => admins.delete(ws));
     return;
