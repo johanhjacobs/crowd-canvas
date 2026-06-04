@@ -10,6 +10,9 @@ module.exports = {
     env: {
       PORT: 3100,
       HOST: '127.0.0.1',
+      // Generate once with: openssl rand -hex 32
+      // Keep this secret — it protects all admin and view endpoints.
+      ADMIN_TOKEN: 'ce4ce73cf27a27632f7e1924be3f99fc8b586e6614b88354f0e6d44d711871b8',
       // Sharp uses libuv's thread pool for all native async ops.
       // Default is 4 threads — far too low for 600 concurrent Sharp decodes/second.
       // On an AX102 (16 cores / 32 threads) 16 is a safe, well-benchmarked value.

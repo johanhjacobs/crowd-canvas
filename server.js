@@ -7,7 +7,7 @@ import http from 'http';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomBytes } from 'crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -17,6 +17,30 @@ sharp.concurrency(2);
 
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
+
+// ── admin token ───────────────────────────────────────────────────────────────
+// Set ADMIN_TOKEN in your environment (ecosystem.config.cjs or shell).
+// Without it the API is unprotected — fine for local dev, not for production.
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+if (!ADMIN_TOKEN) console.warn('[security] ADMIN_TOKEN not set — admin API is open to everyone');
+
+// Random view path — regenerated on every server restart.
+// Only the admin panel shows it, so it stays secret without any password prompt.
+const VIEW_TOKEN = randomBytes(6).toString('hex');
+const VIEW_PATH  = '/view-' + VIEW_TOKEN;
+console.log(`[view] live screen path: ${VIEW_PATH}`);
+
+// Pre-inject token into trusted HTML pages at startup so the browser never
+// has to know the token directly — it's baked in server-side.
+function buildHtml(filePath) {
+  let html = fs.readFileSync(filePath, 'utf8');
+  if (ADMIN_TOKEN) {
+    html = html.replace('</head>', `<script>window._AT='${ADMIN_TOKEN}';</script></head>`);
+  }
+  return html;
+}
+const adminHtml = buildHtml(path.join(__dirname, 'public', 'admin.html'));
+const viewHtml  = buildHtml(path.join(__dirname, 'public', 'view.html'));
 const DATA = path.join(__dirname, 'data');
 const REFS = path.join(DATA, 'refs');
 const FINAL_VIEW = path.join(DATA, 'final-view.png');
@@ -656,9 +680,21 @@ const app = express();
 app.use(express.json({ limit: '5mb' }));
 app.use('/refs', express.static(REFS, { maxAge: '1h' }));
 const noCache = (_, res, next) => { res.set('Cache-Control', 'no-store'); next(); };
+
+// ── auth middleware ───────────────────────────────────────────────────────────
+// Public GET endpoints (players need these — no token required):
+const PUBLIC_API = new Set(['/config', '/export.png', '/export-thumb.png']);
+app.use('/api', (req, res, next) => {
+  if (!ADMIN_TOKEN) return next(); // no token set → dev mode, allow all
+  if (req.method === 'GET' && PUBLIC_API.has(req.path)) return next();
+  const token = req.headers['x-admin-token'] || req.query.token;
+  if (token !== ADMIN_TOKEN) return res.status(401).json({ error: 'unauthorized' });
+  next();
+});
+
 app.get('/',                 noCache, (_, res) => res.sendFile(path.join(__dirname, 'public', 'player.html')));
-app.get('/dropveters-admin', noCache, (_, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
-app.get('/dropveters-view',  noCache, (_, res) => res.sendFile(path.join(__dirname, 'public', 'view.html')));
+app.get('/dropveters-admin', noCache, (_, res) => res.type('html').send(adminHtml));
+app.get(VIEW_PATH,           noCache, (_, res) => res.type('html').send(viewHtml));
 
 // 150 MB covers an uncompressed 8K B&W PNG; typical line-art files are far smaller.
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 150 * 1024 * 1024 } });
@@ -1014,12 +1050,12 @@ app.get('/api/export-thumb.png', async (_, res) => {
 });
 
 function adminState() {
-  if (!state) return { active: false };
+  if (!state) return { active: false, viewPath: VIEW_PATH };
   const subs = db.prepare('SELECT tile, COUNT(*) n FROM submissions GROUP BY tile').all();
   const cnt = new Map(subs.map(s => [s.tile, s.n]));
   return {
     active: true, done: state.done, size: state.size, redundancy: state.redundancy, imgW: state.imgW, imgH: state.imgH,
-    waitingCount: waiting.size, viewMode, viewDelay, viewSidebarWidth,
+    waitingCount: waiting.size, viewMode, viewDelay, viewSidebarWidth, viewPath: VIEW_PATH,
     tiles: [...state.tiles.values()].map(t => ({ id: t.id, x: t.x, y: t.y, sz: t.sz, subs: cnt.get(t.id) || 0 })),
     blanks: state.blanks,
   };
@@ -1273,6 +1309,27 @@ setInterval(() => {
   }
 }, 30_000);
 
+function setupAdminWS(ws, send) {
+  admins.add(ws);
+  send({ type: 'state', ...adminState() });
+  send({ type: 'config', ...getConfig() });
+  send({ type: 'view-path', path: VIEW_PATH });
+  send({ type: 'view-sidebar-width', width: viewSidebarWidth });
+  send({ type: 'view-colors', bg: viewBgColor, text: viewTextColor, tile: viewTileColor, ink: viewInkColor, paper: viewPaperColor });
+  send({ type: 'view-sidebar', on: viewSidebar });
+  ws.on('close', () => admins.delete(ws));
+}
+
+function setupViewWS(ws, send) {
+  views.add(ws);
+  send({ type: 'init', ...viewInitData() });
+  send({ type: 'view-mode', mode: viewMode });
+  send({ type: 'view-sidebar', on: viewSidebar });
+  send({ type: 'view-sidebar-width', width: viewSidebarWidth });
+  broadcastStats();
+  ws.on('close', () => views.delete(ws));
+}
+
 wss.on('connection', (ws, req) => {
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
@@ -1280,25 +1337,20 @@ wss.on('connection', (ws, req) => {
   const role = new URL(req.url, 'http://x').searchParams.get('role');
   const send = o => { if (ws.readyState === 1) ws.send(JSON.stringify(o)); };
 
-  if (role === 'admin') {
-    admins.add(ws);
-    send({ type: 'state', ...adminState() });
-    send({ type: 'config', ...getConfig() });
-    send({ type: 'view-sidebar-width', width: viewSidebarWidth });
-    send({ type: 'view-colors', bg: viewBgColor, text: viewTextColor, tile: viewTileColor, ink: viewInkColor, paper: viewPaperColor });
-    send({ type: 'view-sidebar', on: viewSidebar });
-    ws.on('close', () => admins.delete(ws));
-    return;
-  }
-
-  if (role === 'view') {
-    views.add(ws);
-    send({ type: 'init', ...viewInitData() });
-    send({ type: 'view-mode', mode: viewMode });
-    send({ type: 'view-sidebar', on: viewSidebar });
-    send({ type: 'view-sidebar-width', width: viewSidebarWidth });
-    broadcastStats();
-    ws.on('close', () => views.delete(ws));
+  if (role === 'admin' || role === 'view') {
+    if (!ADMIN_TOKEN) {
+      // No token configured (dev mode) — connect immediately
+      role === 'admin' ? setupAdminWS(ws, send) : setupViewWS(ws, send);
+      return;
+    }
+    // Require token as first message; close if wrong or nothing arrives within 5 s
+    const t = setTimeout(() => ws.terminate(), 5000);
+    ws.once('message', raw => {
+      clearTimeout(t);
+      let m; try { m = JSON.parse(raw); } catch { ws.terminate(); return; }
+      if (m.type !== 'auth' || m.token !== ADMIN_TOKEN) { ws.terminate(); return; }
+      role === 'admin' ? setupAdminWS(ws, send) : setupViewWS(ws, send);
+    });
     return;
   }
 

@@ -161,7 +161,8 @@ function seedFromServer() {
     lastSeedImg = img;
     ctx.drawImage(colorize(img, canvas.width, canvas.height), 0, 0, canvas.width, canvas.height);
   };
-  img.src = '/api/seed.png?t=' + Date.now();
+  const tok = window._AT ? '&token=' + window._AT : '';
+  img.src = '/api/seed.png?t=' + Date.now() + tok;
 }
 
 function resize() {
@@ -231,6 +232,7 @@ let ws;
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?role=view`);
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', token: window._AT || '' }));
   ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
     if (m.type === 'init' || m.type === 'reset') {

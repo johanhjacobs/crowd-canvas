@@ -222,7 +222,27 @@ Write the password down. You'll need it on event day.
 
 ---
 
-## 8. Deploy the app
+## 8. Generate the admin token
+
+All admin and view endpoints are protected by a secret token baked into the app at startup. Generate it once per deployment:
+
+```bash
+openssl rand -hex 32
+# example output: a3f8c2d1e4b7a09f5c3e2d1b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9
+```
+
+Open `ecosystem.config.cjs` and replace the placeholder:
+
+```js
+ADMIN_TOKEN: 'paste-your-generated-token-here',
+```
+
+> **Keep this value secret.** Anyone with the token can control the game.  
+> To rotate it: change the value and run `pm2 restart crowd-canvas --update-env`.
+
+---
+
+## 9. Deploy the app
 
 ```bash
 # On the server
@@ -255,7 +275,7 @@ pm2 logs crowd-canvas --lines 20
 
 ---
 
-## 9. Verify everything works
+## 10. Verify everything works
 
 ```bash
 # Should return HTML
@@ -270,7 +290,7 @@ curl https://YOUR_DOMAIN/api/config
 
 ---
 
-## 10. Load test (Day 4 of the 5-day plan)
+## 11. Load test (Day 4 of the 5-day plan)
 
 You need two cheap extra servers as load generators.  
 On Hetzner: add two **CX22** instances (€0.01/hr each). Delete them after testing.
@@ -321,7 +341,7 @@ watch -n 2 'ss -s | grep estab'
 
 ---
 
-## 11. Event day checklist
+## 12. Event day checklist
 
 **2 hours before doors open:**
 - [ ] `pm2 restart crowd-canvas` — fresh process
@@ -366,5 +386,7 @@ rsync -av --exclude node_modules --exclude data \
   /Users/jacobs/Downloads/crowd-canvas-main/ \
   deploy@YOUR_SERVER_IP:/opt/crowd-canvas/
 
-ssh deploy@YOUR_SERVER_IP 'cd /opt/crowd-canvas && npm install --omit=dev && pm2 restart crowd-canvas'
+ssh deploy@YOUR_SERVER_IP 'cd /opt/crowd-canvas && npm install --omit=dev && pm2 restart crowd-canvas --update-env'
 ```
+
+> Use `--update-env` so pm2 picks up any changes to `ecosystem.config.cjs` (including a rotated `ADMIN_TOKEN`).

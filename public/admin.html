@@ -107,7 +107,12 @@
   .blend-opt{flex:1;padding:7px;text-align:center;font-size:11px;border:1.4px solid var(--ink);border-radius:7px;cursor:pointer;background:var(--paper);}
   .blend-opt.active{background:var(--ink);color:var(--white);}
   #gammaRow{margin-top:10px;}
-  @media(max-width:740px){.grid{grid-template-columns:1fr;}}
+  @media(max-width:740px){
+    body{overflow-y:auto;}
+    .grid{grid-template-columns:1fr;grid-template-rows:auto;height:auto;overflow:visible;}
+    .right-col{overflow:visible;min-height:0;}
+    .mosaic-card{height:60vw;min-height:200px;}
+  }
 </style>
 </head>
 <body>
@@ -260,8 +265,12 @@
         <span class="vs-val" id="sidebarWidthVal">27%</span>
       </div>
     </div>
-    <div style="margin-top:8px;font-size:11px;color:var(--muted);">
-      Big screen: <a href="/dropveters-view" target="_blank" style="color:var(--accent);">Link to big view ↗</a>
+    <div style="margin-top:8px;font-size:11px;color:var(--muted);display:flex;align-items:center;gap:8px;">
+      Big screen:
+      <a id="viewLink" href="#" target="_blank" style="color:var(--accent);">Link to big view ↗</a>
+      <button onclick="navigator.clipboard.writeText(document.getElementById('viewLink').href)"
+        style="font-size:9px;padding:2px 6px;border:1px solid var(--line);border-radius:4px;
+               background:var(--paper);cursor:pointer;color:var(--muted);">copy</button>
     </div>
   </div>
 </div>
@@ -292,6 +301,13 @@
 </div>
 
 <script>
+// Authenticated fetch — attaches the admin token injected by the server.
+// Falls back to plain fetch when no token is set (dev mode).
+const afetch = (url, opts = {}) => fetch(url, {
+  ...opts,
+  headers: { ...(opts.headers || {}), ...(window._AT ? { 'x-admin-token': window._AT } : {}) }
+});
+
 const mc = document.getElementById('mosaic').getContext('2d');
 mc.fillStyle='#000'; mc.fillRect(0,0,1024,1024);
 
@@ -344,10 +360,15 @@ let ws;
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?role=admin`);
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', token: window._AT || '' }));
   ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
     if (m.type === 'config') { applyConfigUI(m); }
     else if (m.type === 'state' || m.type === 'reset') {
+      if (m.viewPath) {
+        const lnk = document.getElementById('viewLink');
+        lnk.href = location.origin + m.viewPath;
+      }
       if (!m.active) return;
       mSize = m.size; tilesMap.clear();
       const mc_el = document.getElementById('mosaic');
@@ -396,6 +417,10 @@ function connect() {
       btn.classList.toggle('active-live', m.on);
       btn.title = m.on ? 'Sidebar is ON — click to hide' : 'Toggle stats sidebar on big screen';
     }
+    else if (m.type === 'view-path') {
+      const lnk = document.getElementById('viewLink');
+      lnk.href = location.origin + m.path;
+    }
     else if (m.type === 'view-colors') { applyViewColorsAdmin(m.bg, m.text, m.tile, m.ink, m.paper); }
     else if (m.type === 'view-sidebar-width') { setSidebarWidthUI(m.width); }
     else if (m.type === 'player-count') {
@@ -433,7 +458,7 @@ function connect() {
       document.getElementById('exportBtn').style.color = '';
       setGameDoneUI(true);
       // re-fetch state so stats show the definitive final numbers
-      fetch('/api/state').then(r => r.json()).then(s => {
+      afetch('/api/state').then(r => r.json()).then(s => {
         if (!s.active) return;
         totalActive = s.tiles.length;
         targetRedundancy = s.redundancy || targetRedundancy;
@@ -478,7 +503,7 @@ function seedMosaic() {
 
 function showReview(tiles) {
   // overlay image
-  document.getElementById('overlayImg').src = '/api/overlay.png?t=' + Date.now();
+  document.getElementById('overlayImg').src = '/api/overlay.png?t=' + Date.now() + (window._AT ? '&token=' + window._AT : '');
   document.getElementById('review').classList.add('on');
   // gallery: sort by sz asc (smallest = most detail = hardest)
   const sorted = [...tiles].sort((a, b) => a.sz - b.sz);
@@ -504,7 +529,7 @@ function showJoin() {
 
 // ── session ───────────────────────────────────────────────────────────────────
 // Check whether a previous image exists on the server and update the label
-fetch('/api/has-previous-image').then(r => r.json()).then(({ exists }) => {
+afetch('/api/has-previous-image').then(r => r.json()).then(({ exists }) => {
   document.getElementById('prevImgNote').style.display = exists ? '' : 'none';
   document.getElementById('noPrevNote').style.display  = exists ? 'none' : '';
 }).catch(() => {});
@@ -514,7 +539,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   const btn = document.getElementById('startBtn');
   // Allow starting without a file only if the server has a previous image
   if (!f) {
-    const check = await fetch('/api/has-previous-image').then(r => r.json()).catch(() => ({ exists: false }));
+    const check = await afetch('/api/has-previous-image').then(r => r.json()).catch(() => ({ exists: false }));
     if (!check.exists) { alert('Pick an image first — no previous image found on the server.'); return; }
   }
   btn.textContent = 'Slicing…'; btn.disabled = true;
@@ -524,7 +549,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   fd.append('redundancy', document.getElementById('redundancy').value);
   fd.append('includeSolidBlack', document.getElementById('includeSolid').checked);
   try {
-    const r = await fetch('/api/session', { method: 'POST', body: fd });
+    const r = await afetch('/api/session', { method: 'POST', body: fd });
     const j = await r.json();
     if (!r.ok) { alert('Server error: ' + (j.error || r.status)); }
   } catch (e) { alert('Request failed: ' + e.message); }
@@ -536,7 +561,7 @@ document.getElementById('restartBtn').addEventListener('click', async () => {
   const btn = document.getElementById('restartBtn');
   btn.textContent = 'Restarting…'; btn.disabled = true;
   try {
-    const r = await fetch('/api/session/restart', { method: 'POST' });
+    const r = await afetch('/api/session/restart', { method: 'POST' });
     if (!r.ok) alert('Could not restart game');
   } catch (e) { alert('Request failed: ' + e.message); }
   btn.textContent = 'Restart game (keep tiles)'; btn.disabled = false;
@@ -548,7 +573,7 @@ document.getElementById('stopBtn').addEventListener('click', async () => {
   const btn = document.getElementById('stopBtn');
   btn.textContent = 'Stopping…'; btn.disabled = true;
   try {
-    const r = await fetch('/api/session/stop', { method: 'POST' });
+    const r = await afetch('/api/session/stop', { method: 'POST' });
     if (!r.ok) alert('Could not stop game');
   } finally {
     btn.textContent = 'Stop game now'; btn.disabled = false;
@@ -559,7 +584,7 @@ document.getElementById('fillBtn').addEventListener('click', async () => {
   btn.textContent = 'Filling…'; btn.disabled = true;
   document.getElementById('stopBtn').disabled = true;
   try {
-    const r = await fetch('/api/session/auto-finish', { method: 'POST' });
+    const r = await afetch('/api/session/auto-finish', { method: 'POST' });
     if (!r.ok) { alert('Could not start fill'); btn.textContent = 'Finish & fill remaining ↓'; btn.disabled = false; }
     // buttons reset when the WS 'done' message arrives via setGameDoneUI
   } catch { btn.textContent = 'Finish & fill remaining ↓'; btn.disabled = false; }
@@ -568,7 +593,7 @@ document.getElementById('resumeBtn').addEventListener('click', async () => {
   const btn = document.getElementById('resumeBtn');
   btn.textContent = 'Resuming…'; btn.disabled = true;
   try {
-    const r = await fetch('/api/session/resume', { method: 'POST' });
+    const r = await afetch('/api/session/resume', { method: 'POST' });
     if (!r.ok) alert('Could not resume game');
   } finally {
     btn.textContent = 'Resume game now'; btn.disabled = false;
@@ -610,7 +635,7 @@ function applyConfigUI(cfg) {
   }
 }
 document.getElementById('saveColors').addEventListener('click', async () => {
-  await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  await afetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ inkColor: document.getElementById('cInk').value, paperColor: document.getElementById('cPaper').value, canvasColor: document.getElementById('cCanvas').value, sendColor: document.getElementById('cSend').value }) });
 });
 
@@ -627,46 +652,46 @@ document.getElementById('gamma').addEventListener('input', function () {
 document.getElementById('saveBlend').addEventListener('click', async () => {
   const liveMinPixelVotes = Math.max(0, Math.min(5, parseInt(document.getElementById('liveVotes').value, 10) || 0));
   document.getElementById('liveVotes').value = liveMinPixelVotes;
-  await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  await afetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ blendMode, blendGamma: +document.getElementById('gamma').value, liveMinPixelVotes }) });
 });
 
 document.getElementById('simSlider').addEventListener('input', function() {
   const v = +this.value;
   document.getElementById('simVal').textContent = v === 0 ? 'off' : Math.round(v * 100) + '%';
-  fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  afetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ similarityThreshold: v }) });
 });
 
 document.getElementById('straySlider').addEventListener('input', function() {
   const v = +this.value;
   document.getElementById('strayVal').textContent = v.toFixed(2).replace(/\.00$/, '');
-  fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  afetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ maxStrayInk: v }) });
 });
 
 document.getElementById('covSlider').addEventListener('input', function() {
   const v = +this.value;
   document.getElementById('covVal').textContent = v === 0 ? 'off' : Math.round(v * 100) + '%';
-  fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  afetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ minCoverage: v }) });
 });
 
 let sidebarOn = false;
 document.getElementById('vcSidebar').addEventListener('click', () => {
   sidebarOn = !sidebarOn;
-  fetch('/api/view/sidebar', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({on: sidebarOn}) });
+  afetch('/api/view/sidebar', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({on: sidebarOn}) });
 });
 // reflect sidebar state from server (e.g. on reconnect)
 // handled in WS message handler: m.type === 'view-sidebar'
 
 document.getElementById('vcBg').addEventListener('click', () => {
-  fetch('/api/view/background', { method:'POST' });
+  afetch('/api/view/background', { method:'POST' });
 });
 document.getElementById('delaySlider').addEventListener('input', function() {
   const v = +this.value;
   document.getElementById('delayVal').textContent = v === 0 ? 'instant' : v + 's';
-  fetch('/api/view/delay', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({delay:v}) });
+  afetch('/api/view/delay', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({delay:v}) });
 });
 
 function setSidebarWidthUI(w) {
@@ -678,7 +703,7 @@ document.getElementById('sidebarWidthSlider').addEventListener('input', function
   document.getElementById('sidebarWidthVal').textContent = this.value + '%';
 });
 document.getElementById('sidebarWidthSlider').addEventListener('change', function() {
-  fetch('/api/view/sidebar-width', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({width: +this.value}) });
+  afetch('/api/view/sidebar-width', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({width: +this.value}) });
 });
 
 function applyViewColorsAdmin(bg, text, tile, ink, paper) {
@@ -691,7 +716,7 @@ function applyViewColorsAdmin(bg, text, tile, ink, paper) {
 }
 function pushViewColors() {
   const paper = document.getElementById('vcPaperColor').value;
-  fetch('/api/view/colors', { method:'POST', headers:{'Content-Type':'application/json'},
+  afetch('/api/view/colors', { method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ bg:    document.getElementById('vcBgColor').value,
                            text:  document.getElementById('vcTextColor').value,
                            tile:  paper,   // empty-tile color = paper color
@@ -718,7 +743,7 @@ function setAutoPush(secs) {
     apCountdown--;
     el.textContent = `next in ${apCountdown}s`;
     if (apCountdown <= 0) {
-      fetch('/api/view/sync', { method:'POST' });
+      afetch('/api/view/sync', { method:'POST' });
       apCountdown = apSecs;
     }
   }, 1000);
@@ -732,16 +757,16 @@ function setViewCtrl(mode) {
   document.getElementById('vcBlank').className = 'vc-btn' + (mode === 'paused' ? ' active-blank' : '');
 }
 document.getElementById('vcLive').addEventListener('click', () => {
-  fetch('/api/view/mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode:'live'}) });
+  afetch('/api/view/mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode:'live'}) });
 });
 document.getElementById('vcHold').addEventListener('click', () => {
-  fetch('/api/view/mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode:'hold'}) });
+  afetch('/api/view/mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode:'hold'}) });
 });
 document.getElementById('vcBlank').addEventListener('click', () => {
-  fetch('/api/view/mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode:'paused'}) });
+  afetch('/api/view/mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode:'paused'}) });
 });
 document.getElementById('vcPush').addEventListener('click', () => {
-  fetch('/api/view/sync', { method:'POST' });
+  afetch('/api/view/sync', { method:'POST' });
   // restart auto-push countdown so it doesn't fire immediately after a manual push
   if (apSecs > 0) { apCountdown = apSecs; document.getElementById('pushCountdown').textContent = `next in ${apCountdown}s`; }
 });
@@ -776,7 +801,7 @@ document.getElementById('mosaic').addEventListener('click', async e => {
   const subsEl = document.getElementById('modalSubs');
   subsEl.innerHTML = '<span class="empty">Loading…</span>';
   try {
-    const r = await fetch(`/api/tile/${id}/submissions`);
+    const r = await afetch(`/api/tile/${id}/submissions`);
     const subs = await r.json();
     if (!subs.length) {
       subsEl.innerHTML = '<span class="empty">No drawings yet.</span>';
@@ -796,7 +821,7 @@ document.getElementById('modalSubs').addEventListener('click', async e => {
   const btn = e.target.closest('.sub-del');
   if (!btn || btn.disabled) return;
   btn.textContent = '…'; btn.disabled = true;
-  const r = await fetch(`/api/submission/${btn.dataset.subid}/delete`, { method: 'POST' });
+  const r = await afetch(`/api/submission/${btn.dataset.subid}/delete`, { method: 'POST' });
   if (r.ok) {
     btn.closest('.sub-wrap').remove();
     const remaining = document.querySelectorAll('#modalSubs .sub-wrap').length;
@@ -818,13 +843,13 @@ document.getElementById('modalClear').addEventListener('click', async () => {
   if (!selectedTileId) return;
   const btn = document.getElementById('modalClear');
   btn.textContent = 'Clearing…'; btn.disabled = true;
-  await fetch(`/api/tile/${selectedTileId}/clear`, { method: 'POST' });
+  await afetch(`/api/tile/${selectedTileId}/clear`, { method: 'POST' });
   document.getElementById('tileModal').classList.remove('on');
   btn.textContent = 'Clear all drawings for this tile'; btn.disabled = false;
 });
 
 // load current config
-fetch('/api/config').then(r => r.json()).then(applyConfigUI);
+afetch('/api/config').then(r => r.json()).then(applyConfigUI);
 </script>
 </body>
 </html>
