@@ -138,11 +138,15 @@ server {
     gzip_types text/html application/json text/css application/javascript;
     gzip_min_length 1024;
 
+    # Serve the player page straight from disk — it never touches Node, so a
+    # browser reload is instant even when the app is saturated under load.
+    # (player.html has no admin token, unlike admin/view, so it's safe to serve
+    # statically.) The short cache means a reload within 60s is a pure browser-
+    # cache hit with zero server round-trip.
     location = / {
-        limit_req zone=player burst=200 nodelay;
-        proxy_pass http://app;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
+        root /opt/crowd-canvas/public;
+        try_files /player.html =404;
+        add_header Cache-Control "public, max-age=60";
     }
 
     location /refs/ {
@@ -193,6 +197,14 @@ ln -s /etc/nginx/sites-available/crowd-canvas /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl reload nginx
 ```
+
+> **Keep `sites-enabled/crowd-canvas` a symlink, not a copy.** If it's a plain
+> file, edits to `sites-available/` won't take effect (we hit exactly this — the
+> enabled copy was stale and kept proxying `/` to Node). Verify with
+> `ls -l /etc/nginx/sites-enabled/` (you want `crowd-canvas -> ../sites-available/crowd-canvas`).
+> Note: changing a file into a symlink needs `systemctl restart nginx` — a plain
+> `reload` may not pick it up. Confirm the static page is live with:
+> `curl -sI https://YOUR_DOMAIN/ | grep -i cache` → should show `public, max-age=60`, **not** `no-store`.
 
 ---
 

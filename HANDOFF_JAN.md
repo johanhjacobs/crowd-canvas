@@ -147,3 +147,10 @@ Always re-slice a **test** image first (fills the mosaic with junk + clears the 
   no multiple instances — they'd hand out duplicate tiles and desync the mosaic. Scale vertically.
 - Sharp runs single-threaded in the main process (`sharp.concurrency(1)`); CPU-heavy decode/render
   is offloaded to the worker pool (`render-worker.js`). `max_memory_restart` is now 16 G.
+- **nginx serves the player page (`location = /`) statically from `/opt/crowd-canvas/public/player.html`**,
+  bypassing Node. This was added because a browser reload under heavy load took ~20s (the HTML was
+  served by a saturated Node main thread); static serving makes a reload near-instant. Keep it — do
+  not revert `location = /` to `proxy_pass`. `player.html` has no token so it's safe to serve raw.
+  (`/ws`, `/api/*`, `/dropveters-admin`, `/dropveters-view` still proxy to Node.) Also: keep
+  `sites-enabled/crowd-canvas` a **symlink** to `sites-available/` — a stale plain-file copy there
+  silently kept the old config; see DEPLOY.md §5.
