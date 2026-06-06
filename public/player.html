@@ -381,23 +381,39 @@ function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?role=player`);
 
-  // ── connect timing instrumentation (debug — remove once join speed is solved) ──
-  // Splits the "Connecting" time into phases so we can see WHERE a slow join hangs:
-  //   page   = HTML+TCP+TLS of the page load (Navigation Timing)
-  //   ws-open= time to open the WebSocket socket (its own TCP+TLS+upgrade)
-  //   1st-msg= socket-open → server's first message (Node running give())
-  // Live clock shows on the boot screen; a precise breakdown is logged to the console
-  // (read via Safari → Develop → [iPhone]).
+  // ── nerdy boot HUD ─────────────────────────────────────────────────────────
+  // Live per-phase connect readout on the boot screen (page / TLS / ws-socket /
+  // server) + a precise [conn] line to the console. Doubles as diagnostics: if a
+  // join is ever slow again you can see exactly which phase hangs.
   const tConnectStart = performance.now();
   let _wsOpenAt = 0, _firstMsgLogged = false;
+  const _nav = performance.getEntriesByType ? performance.getEntriesByType('navigation')[0] : null;
+  const _pageMs = _nav ? Math.round(_nav.responseEnd - _nav.startTime) : -1;
+  const _tlsMs  = _nav && _nav.secureConnectionStart ? Math.round(_nav.connectEnd - _nav.secureConnectionStart) : -1;
+  const _fmt = ms => ms < 0 ? '—' : (ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms');
+  function _hud(done) {
+    const el = document.getElementById('bootMsg');
+    if (!el) return;
+    const now = performance.now();
+    const sockMs = _wsOpenAt ? Math.round(_wsOpenAt - tConnectStart) : Math.round(now - tConnectStart);
+    const srvMs  = _wsOpenAt ? Math.round(now - _wsOpenAt) : 0;
+    const row = (ok, label, val, sub) =>
+      `<div>[${ok ? '✓' : '·'}] ${label.padEnd(9)} ${val}${sub ? ' <span style="opacity:.55">' + sub + '</span>' : ''}</div>`;
+    el.innerHTML =
+      `<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.7;text-align:left;white-space:pre;opacity:.9">`
+      + `<div style="opacity:.7">${done ? 'crowd-canvas online ✓' : 'booting crowd-canvas…'}</div>`
+      + row(true, 'page', _fmt(_pageMs), 'tls ' + _fmt(_tlsMs))
+      + row(!!_wsOpenAt, 'ws socket', _fmt(sockMs) + (_wsOpenAt || done ? '' : ' …'))
+      + row(done, 'server', _wsOpenAt ? _fmt(srvMs) + (done ? '' : ' …') : '—')
+      + `</div>`;
+  }
   if (window._connTick) clearInterval(window._connTick);
   window._connTick = setInterval(() => {
     if (!document.getElementById('boot')) { clearInterval(window._connTick); return; }
-    const s = ((performance.now() - tConnectStart) / 1000).toFixed(1);
-    setBootMsg(_wsOpenAt ? `Connecting… ${s}s (socket open, waiting for server)`
-                         : `Connecting… ${s}s (opening socket)`);
-  }, 200);
-  ws.onopen = () => { _wsOpenAt = performance.now(); };
+    _hud(false);
+  }, 100);
+  _hud(false);
+  ws.onopen = () => { _wsOpenAt = performance.now(); _hud(false); };
 
   // Connect watchdog: a socket can OPEN but never receive a first message when the
   // server is saturated and can't service the connection. Without this, the player
@@ -416,12 +432,11 @@ function connect() {
     if (!_firstMsgLogged) {
       _firstMsgLogged = true;
       if (window._connTick) clearInterval(window._connTick);
-      const nav = performance.getEntriesByType ? performance.getEntriesByType('navigation')[0] : null;
-      const pageMs = nav ? Math.round(nav.responseEnd - nav.startTime) : -1;
-      const tlsMs  = nav && nav.secureConnectionStart ? Math.round(nav.connectEnd - nav.secureConnectionStart) : -1;
       const wsOpenMs   = _wsOpenAt ? Math.round(_wsOpenAt - tConnectStart) : -1;
       const firstMsgMs = _wsOpenAt ? Math.round(performance.now() - _wsOpenAt) : -1;
-      console.log(`[conn] page=${pageMs}ms tls=${tlsMs}ms ws-open=${wsOpenMs}ms first-msg=${firstMsgMs}ms total=${Math.round(performance.now()-tConnectStart)}ms`);
+      const totalMs    = Math.round(performance.now() - tConnectStart);
+      _hud(true); // flash the completed boot HUD during the fade-out (no added delay)
+      console.log(`[conn] page=${_pageMs}ms tls=${_tlsMs}ms ws-open=${wsOpenMs}ms first-msg=${firstMsgMs}ms total=${totalMs}ms`);
     }
     dismissBoot();
     const m = JSON.parse(ev.data);
