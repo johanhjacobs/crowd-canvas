@@ -93,11 +93,52 @@ const renderPool = new RenderWorkerPool(
 console.log(`[render] ${RENDER_WORKERS} render worker(s) started`);
 
 const HOT_QUEUE_SOFT_LIMIT = 400;
+
+// ── session-level render tracking ─────────────────────────────────────────────
+let sessionEpoch = 0;
+let pendingSubmissionRenders = 0;
+const tileRenderChains = new Map(); // tileId → latest render promise (sequential per tile)
+const autoFillTimers = new Set();
+
 function hotPathDepth() {
   return renderPool.pending + (submissionWriteQueue?.length || 0);
 }
 function isHotPathBusy() {
   return hotPathDepth() >= HOT_QUEUE_SOFT_LIMIT;
+}
+
+// ── PNG helpers ───────────────────────────────────────────────────────────────
+function pngInputToBuffer(input) {
+  if (Buffer.isBuffer(input)) return input;
+  if (input instanceof Uint8Array) return Buffer.from(input);
+  if (typeof input === 'string') return Buffer.from(input.replace(/^data:[^;]+;base64,/, ''), 'base64');
+  return Buffer.from(input);
+}
+function pngBufferToDataUrl(buf) {
+  return 'data:image/png;base64,' + buf.toString('base64');
+}
+
+function clearAutoFillTimers() {
+  for (const timer of autoFillTimers) clearTimeout(timer);
+  autoFillTimers.clear();
+}
+
+function bumpSessionEpoch() {
+  sessionEpoch++;
+  submissionWriteQueue = [];
+  pendingSubmissionRenders = 0;
+  tileRenderChains.clear();
+  if (submissionFlushTimer) { clearTimeout(submissionFlushTimer); submissionFlushTimer = null; }
+  clearAutoFillTimers();
+}
+
+async function waitForRenderDrain() {
+  while (tileRenderChains.size || pendingSubmissionRenders > 0 || renderPool.pending > 0) {
+    const pending = [...tileRenderChains.values()];
+    if (pending.length) await Promise.allSettled(pending);
+    else await new Promise(r => setTimeout(r, 20));
+  }
+  await flushSubmissionWrites();
 }
 
 const PORT = process.env.PORT || 3000;
@@ -247,11 +288,12 @@ function loadActive() {
     if (t.blank) blanks.push({ x: t.x, y: t.y, sz: t.sz, fill: t.fill ?? 255 });
     else map.set(t.id, { ...t, assigned: 0 });
   }
-  const blendedPngs = new Map(), livePngs = new Map(), tileVersions = new Map();
+  const blendedPngs = new Map(), livePngs = new Map(), tileVersions = new Map(), tileResetTokens = new Map();
   for (const [id] of map) {
     blendedPngs.set(id, null);
     livePngs.set(id, undefined); // undefined = not rendered yet; null = no submissions
     tileVersions.set(id, 0);
+    tileResetTokens.set(id, 0);
   }
 
   // rebuild submission counts from DB
@@ -273,7 +315,8 @@ function loadActive() {
     [tileIds[i], tileIds[j]] = [tileIds[j], tileIds[i]];
   }
 
-  state = { id: s.id, size: s.size, redundancy, tiles: map, blanks, blendedPngs, livePngs, tileVersions,
+  state = { id: s.id, size: s.size, redundancy, tiles: map, blanks, blendedPngs, livePngs, tileVersions, tileResetTokens,
+            epoch: sessionEpoch,
             submissionCounts, done, imgW, imgH,
             tileIds,       // shuffled order — never changes
             deckPos: 0,    // round-robin pointer into tileIds
@@ -484,16 +527,15 @@ async function blendTile(tileId, opts = {}) {
 // Memory ceiling: 5000 tiles × 256×256 × 4 bytes ≈ 1.3 GB — fine on 128 GB server.
 // The accumulator is rebuilt from the DB on server restart (one-time async cost).
 
-async function decodePngToInk(png64) {
-  const input = typeof png64 === 'string' ? png64 : png64;
-  const result = await renderPool.run('decode-png-to-ink', { input });
+async function decodePngToInk(input) {
+  const result = await renderPool.run('decode-png-to-ink', { input: pngInputToBuffer(input) });
   return new Float32Array(result.inkBuffer);
 }
 
-// Merge one new submission into the tile accumulator and return a fresh blended PNG.
-async function accumulatorAdd(tileId, png64) {
+// Merge one new submission into the tile accumulator and return { blended, live } PNGs.
+async function accumulatorAdd(tileId, pngBuf) {
   if (!state) return null;
-  const ink = await decodePngToInk(png64);
+  const ink = await decodePngToInk(pngBuf);
   let acc = state.accumulators.get(tileId);
   if (!acc) {
     acc = { count: 0, inkSum: new Float32Array(256 * 256) };
@@ -501,7 +543,14 @@ async function accumulatorAdd(tileId, png64) {
   }
   for (let i = 0; i < 256 * 256; i++) acc.inkSum[i] += ink[i];
   acc.count++;
-  return renderAccumulator(acc);
+  const cfg = getConfig();
+  const liveMin = Math.max(0, Math.min(5, cfg.liveMinPixelVotes | 0));
+  const gamma = cfg.blendGamma || 1.71;
+  const inkSumCopy = acc.inkSum.slice().buffer;
+  const result = await renderPool.run('render-accumulator-pair', {
+    inkSumBuffer: inkSumCopy, count: acc.count, gamma, liveMin,
+  });
+  return { blended: Buffer.from(result.fullPng), live: Buffer.from(result.livePng) };
 }
 
 // Render a blended PNG from an accumulator — offloaded to a render worker.
@@ -512,10 +561,7 @@ async function renderAccumulator(acc, opts = {}) {
   const liveMin = opts.liveView ? Math.max(0, Math.min(5, cfg.liveMinPixelVotes | 0)) : 0;
   const inkSumCopy = acc.inkSum.slice().buffer;
   const result = await renderPool.run('render-accumulator-pair', {
-    inkSumBuffer: inkSumCopy,
-    count: acc.count,
-    gamma,
-    liveMin,
+    inkSumBuffer: inkSumCopy, count: acc.count, gamma, liveMin,
   });
   return opts.liveView ? Buffer.from(result.livePng) : Buffer.from(result.fullPng);
 }
@@ -822,49 +868,54 @@ function assignTile(hasSubmitted = false) {
 // handler means a burst of simultaneous submissions saturates the libuv thread pool.
 // Solution: queue submissions and process CONCURRENCY items in parallel — matching
 // UV_THREADPOOL_SIZE so all threads stay busy without over-queuing.
-const subQueue = [];
-const SUB_CONCURRENCY = 8; // match UV_THREADPOOL_SIZE
-let subActive = 0;
+// ── per-tile render pipeline ───────────────────────────────────────────────────
+// Each tile has its own promise chain so renders are sequential per tile but
+// parallel across tiles. Epoch + resetToken checks prevent stale renders from
+// writing results after a session reset.
 
-async function processOneSubQueueItem() {
-  const { tileId, png } = subQueue.shift();
-  if (!state || !state.tiles.has(tileId)) return;
-  try {
-    const cfg = getConfig();
-    let blended;
-    if (cfg.blendMode === 'blend') {
-      blended = await accumulatorAdd(tileId, png);
-    } else {
-      blended = await blendTile(tileId);
-    }
-    if (blended) {
-      state.blendedPngs.set(tileId, blended);
-      const liveMin = cfg.liveMinPixelVotes || 0;
-      state.livePngs.set(tileId, liveMin === 0 ? blended
-        : cfg.blendMode === 'blend' && state.accumulators.has(tileId)
-          ? await renderAccumulator(state.accumulators.get(tileId), { liveView: true })
-          : await renderLiveTilePng(tileId, blended));
-      const t = state.tiles.get(tileId);
-      if (t) {
-        const pngData = 'data:image/png;base64,' + blended.toString('base64');
-        enqueueAdminTileUpdate({ type: 'tile-update', tileId, x: t.x, y: t.y, sz: t.sz, png: pngData, subs: state.submissionCounts.get(tileId) || 0 });
-        scheduleViewUpdate(await liveTileUpdate(tileId, t));
-        broadcastStats();
-        scheduleSeedRebuild();
-      }
-    }
-  } catch (e) {
-    console.error('[subQueue] error processing tile', tileId, e);
+async function processSubmissionRender(job) {
+  if (!state || state.epoch !== job.epoch || !state.tiles.has(job.tileId)) return;
+  if ((state.tileResetTokens.get(job.tileId) || 0) !== job.resetToken) return;
+
+  const cfg = getConfig();
+  let blended, live;
+  if (cfg.blendMode === 'blend') {
+    const rendered = await accumulatorAdd(job.tileId, job.pngBuf);
+    if (!rendered) return;
+    blended = rendered.blended;
+    live = rendered.live;
+  } else {
+    blended = await blendTile(job.tileId);
+    if (!blended) return;
+    live = await renderLiveTilePng(job.tileId, blended);
   }
+
+  if (!state || state.epoch !== job.epoch || !state.tiles.has(job.tileId)) return;
+  if ((state.tileResetTokens.get(job.tileId) || 0) !== job.resetToken) return;
+
+  state.blendedPngs.set(job.tileId, blended);
+  state.livePngs.set(job.tileId, live);
+  const t = state.tiles.get(job.tileId);
+  enqueueAdminTileUpdate({ type: 'tile-update', tileId: job.tileId, x: t.x, y: t.y, sz: t.sz, png: pngBufferToDataUrl(blended), subs: state.submissionCounts.get(job.tileId) || 0 });
+  scheduleViewUpdate(await liveTileUpdate(job.tileId, t));
+  broadcastStats();
+  scheduleSeedRebuild();
 }
 
-function processSubQueue() {
-  while (subQueue.length > 0 && subActive < SUB_CONCURRENCY) {
-    subActive++;
-    processOneSubQueueItem()
-      .then(() => { subActive--; processSubQueue(); })
-      .catch(() => { subActive--; processSubQueue(); });
-  }
+function scheduleSubmissionRender(job) {
+  pendingSubmissionRenders++;
+  const prev = tileRenderChains.get(job.tileId) || Promise.resolve();
+  let current;
+  current = prev.catch(() => {}).then(async () => {
+    try {
+      await processSubmissionRender(job);
+    } finally {
+      pendingSubmissionRenders = Math.max(0, pendingSubmissionRenders - 1);
+      if (tileRenderChains.get(job.tileId) === current) tileRenderChains.delete(job.tileId);
+    }
+  });
+  tileRenderChains.set(job.tileId, current);
+  current.catch(console.error);
 }
 
 // ── http ──────────────────────────────────────────────────────────────────────
@@ -875,10 +926,11 @@ const noCache = (_, res, next) => { res.set('Cache-Control', 'no-store'); next()
 
 // ── auth middleware ───────────────────────────────────────────────────────────
 // Public GET endpoints (players need these — no token required):
-const PUBLIC_API = new Set(['/config', '/export.png', '/export-thumb.png']);
+const PUBLIC_API = new Set(['/config', '/export.png', '/export-thumb.png', '/seed.png']);
 app.use('/api', (req, res, next) => {
   if (!ADMIN_TOKEN) return next(); // no token set → dev mode, allow all
   if (req.method === 'GET' && PUBLIC_API.has(req.path)) return next();
+  if (req.method === 'GET' && req.path.startsWith('/live-tile/')) return next();
   const token = req.headers['x-admin-token'] || req.query.token;
   if (token !== ADMIN_TOKEN) return res.status(401).json({ error: 'unauthorized' });
   next();
@@ -907,6 +959,7 @@ app.post('/api/session', upload.single('image'), async (req, res) => {
     const includeSolidBlack = req.body.includeSolidBlack === 'true' || req.body.includeSolidBlack === true;
     // Persist slice settings so admin UI restores them after a server restart
     saveConfig({ ...getConfig(), defaultPieces: pieces, defaultIncludeSolidBlack: includeSolidBlack });
+    bumpSessionEpoch();
     const r = await slice(buffer, pieces, redundancy, includeSolidBlack);
     broadcastAdmins({ type: 'reset', ...adminState() });
     broadcastViews({ type: 'reset', ...viewInitData() });
@@ -919,11 +972,14 @@ app.post('/api/session', upload.single('image'), async (req, res) => {
 // reshuffles the deck.  No re-upload or re-slice needed.
 app.post('/api/session/restart', (_, res) => {
   if (!state) return res.status(404).json({ error: 'no active session' });
+  bumpSessionEpoch();
   db.prepare('DELETE FROM submissions').run();
   for (const id of state.tiles.keys()) {
     state.submissionCounts.set(id, 0);
     state.blendedPngs.set(id, null);
     state.livePngs.set(id, null);
+    state.tileVersions.set(id, 0);
+    state.tileResetTokens.set(id, (state.tileResetTokens.get(id) || 0) + 1);
   }
   state.accumulators.clear();
   state.done       = false;
@@ -931,6 +987,7 @@ app.post('/api/session/restart', (_, res) => {
   state.autoFilling = false;
   state.activeCount.clear();
   state.autoFilledTiles.clear();
+  state.epoch = sessionEpoch;
   invalidateFinalView();
   // Reshuffle so the mosaic fills in a different scattered order each run
   for (let i = state.tileIds.length - 1; i > 0; i--) {
@@ -1079,7 +1136,8 @@ app.get('/api/live-tile/:id.png', async (req, res) => {
     if (!state || !state.tiles.has(id)) return res.status(404).end();
     const buf = await getLiveTilePng(id);
     if (!buf) return res.status(404).end();
-    res.set('Cache-Control', 'no-store').type('png').send(buf);
+    // versioned URL (?v=N) — safe to cache; version bumps on every tile update
+    res.set('Cache-Control', 'public, max-age=300').type('png').send(buf);
   } catch (e) { console.error(e); res.status(500).end(); }
 });
 
@@ -1137,6 +1195,7 @@ app.post('/api/submission/:id/delete', (req, res) => {
   db.prepare('DELETE FROM submissions WHERE id=?').run(subId);
   const newCount = Math.max(0, (state.submissionCounts.get(sub.tile) || 0) - 1);
   state.submissionCounts.set(sub.tile, newCount);
+  state.tileResetTokens.set(sub.tile, (state.tileResetTokens.get(sub.tile) || 0) + 1);
   if (state.done && newCount < (state.redundancy || 3)) {
     state.done = false;
     invalidateFinalView();
@@ -1191,6 +1250,7 @@ app.post('/api/tile/:id/clear', (req, res) => {
   state.blendedPngs.set(id, null);
   state.livePngs.set(id, null);
   state.accumulators.delete(id);
+  state.tileResetTokens.set(id, (state.tileResetTokens.get(id) || 0) + 1);
   scheduleSeedRebuild(500); // admin action — rebuild quickly
   if (state.done) {
     state.done = false; // reopen the game if it had completed
@@ -1337,10 +1397,9 @@ async function finishSession() {
   broadcastPlayers({ type: 'done' });
   broadcastStats();
 
-  // Build everything sequentially — never concurrently — to avoid Sharp memory spikes.
-  // Order matters: export first (players need it), then seed (view-sync requires it),
-  // then final-view. Only broadcast view-sync once seed is actually ready.
-  ensureExportPng()
+  // Drain pending renders first, then build final images.
+  waitForRenderDrain()
+    .then(() => ensureExportPng())
     .then(() => ensureExportThumb())
     .then(() => buildSeedPng())          // seed must be complete before view-sync
     .then(() => ensureFinalViewImage())
@@ -1384,7 +1443,8 @@ async function autoFillAndFinish(durationMs = 10000) {
   const batchInterval = durationMs / totalBatches;
 
   for (let b = 0; b < totalBatches; b++) {
-    setTimeout(async () => {
+    const timer = setTimeout(async () => {
+      autoFillTimers.delete(timer);
       if (!state) return;
       const slice = remaining.slice(b * BATCH, (b + 1) * BATCH);
       for (const { id, t } of slice) {
@@ -1402,6 +1462,7 @@ async function autoFillAndFinish(durationMs = 10000) {
         enqueueViewUpdate({ type: 'tile-update', tileId: id, x: t.x, y: t.y, sz: t.sz, version: afVersion });
       }
     }, Math.round(b * batchInterval));
+    autoFillTimers.add(timer);
   }
 
   // Officially close the game once the fill animation is done.
@@ -1673,7 +1734,7 @@ wss.on('connection', (ws, req) => {
       if (typeof m.png !== 'string' || m.png.length > 350_000) return;
 
       // 4) PNG magic byte check — rejects non-image payloads without a Sharp decode.
-      const rawBuf = Buffer.from(m.png.replace(/^data:[^;]+;base64,/, ''), 'base64');
+      const rawBuf = pngInputToBuffer(m.png);
       if (rawBuf.length < 4 ||
           rawBuf[0] !== 0x89 || rawBuf[1] !== 0x50 ||
           rawBuf[2] !== 0x4e || rawBuf[3] !== 0x47) return; // not a PNG
@@ -1686,10 +1747,12 @@ wss.on('connection', (ws, req) => {
       releaseCurrentTile();
       send({ type: 'accepted', rateLimitSeconds: rateLimitWait });
 
-      // Queue Sharp work — decouple blending from the WebSocket event loop so
-      // a spike of simultaneous submissions doesn't saturate the libuv thread pool.
-      subQueue.push({ tileId: m.tileId, png: m.png });
-      processSubQueue();
+      scheduleSubmissionRender({
+        epoch: state.epoch,
+        tileId: m.tileId,
+        pngBuf: rawBuf,
+        resetToken: state.tileResetTokens.get(m.tileId) || 0,
+      });
 
       if (!state.done) {
         const redundancy = state.redundancy || 3;
