@@ -15,6 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Keep Sharp single-threaded in the main process — render workers each get their own thread.
 sharp.concurrency(1);
+sharp.cache(false);
 
 const RENDER_WORKERS = Math.max(1, Math.min(4, (os.availableParallelism?.() || 2) - 1));
 const SUBMISSION_DB_FLUSH_MS = 80;
@@ -1774,3 +1775,7 @@ wss.on('connection', (ws, req) => {
 // during a connection storm and resets incoming sockets (nginx logs them as
 // upstream "connection reset by peer"). Capped by net.core.somaxconn, so raise that too.
 server.listen(PORT, HOST, 65535, () => console.log(`crowd-canvas on ${HOST}:${PORT}`));
+
+// Crash guards — keep the process alive through a single bad event.
+process.on('unhandledRejection', e => console.error('[unhandledRejection]', e));
+process.on('uncaughtException',  e => console.error('[uncaughtException]', e));

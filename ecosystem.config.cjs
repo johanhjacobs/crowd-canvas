@@ -20,6 +20,6 @@ module.exports = {
     },
     // AX102 has 128 GB RAM; the accumulator for 5000 tiles peaks at ~1.3 GB.
     // Set ceiling well above that so PM2 doesn't restart mid-event.
-    max_memory_restart: '6G',
+    max_memory_restart: '16G',
   }],
 };
