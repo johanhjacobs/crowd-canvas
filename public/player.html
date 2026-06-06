@@ -168,8 +168,12 @@
 <div id="done">
   <h2>Thank you!</h2>
   <p>The final mosaic is ready.<br>Tap it to download the full version.</p>
-  <a id="finalLink" href="/api/export.png" download="crowd-canvas.png">
-    <img id="finalThumb" src="/api/export-thumb.png" alt="Final mosaic">
+  <!-- No src/href here on purpose: /api/export-thumb.png and /api/export.png are
+       expensive Node-built images. A hardcoded src made EVERY player page-load fetch
+       the thumbnail (~16s under load → competes with WS handling on Node's thread and
+       made joins feel slow). loadDoneThumb() sets both only when the game is done. -->
+  <a id="finalLink" download="crowd-canvas.png">
+    <img id="finalThumb" alt="Final mosaic">
     <span>Download full image</span>
   </a>
 </div>
