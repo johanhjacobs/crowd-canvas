@@ -5,9 +5,10 @@ Notes for Jan after a full load-test session against production (`asml.mmsparty.
 15k online), ~4,190 playable tiles, redundancy 5.
 
 **TL;DR:** Two real showstoppers were found and fixed (both committed in `fbd7dfe`, live on
-`origin/main`). The server is now solid under load. What remains is a handful of **client-side /
-UX** tweaks and one **operational** decision (stagger the QR reveal). nginx/TLS is *not* a
-bottleneck; no CPU upgrade is required.
+`origin/main`). The server is now solid under load. The two client-side UX fixes (§3.1 watchdog,
+§3.2 waiting overlay) are also done in this commit. What remains is one **operational** decision —
+stagger the QR reveal (§3.3) — plus two optional tweaks. nginx/TLS is *not* a bottleneck; no CPU
+upgrade is required.
 
 ---
 
@@ -72,25 +73,22 @@ is technically unmeasured. All evidence points to plenty of headroom, but see §
 
 ## 3. Remaining TODO
 
-### 3.1 Raise the connect watchdog (client) — highest value, one line
-`public/player.html:388` — the watchdog tears the socket down and reconnects if no message arrives
-within **8 s**. Measured connect under load was 10–20 s, so phones bail *while the connection is
-actually still working*, then reconnect — amplifying the storm. Bump to ~25 s:
-```js
-}, 8000);   // → }, 25000);
-```
-The existing backoff+jitter (`player.html:454`) stays; a longer watchdog just stops premature
+### 3.1 Connect watchdog raised 8 s → 25 s ✅ DONE (this commit)
+`public/player.html` — the watchdog used to tear the socket down and reconnect if no message
+arrived within **8 s**. Measured connect under load is 10–20 s, so phones bailed *while the
+connection was actually still working*, then reconnected — amplifying the storm. Now **25 s**. The
+existing backoff+jitter on `onclose` is unchanged; the longer watchdog just stops premature
 give-ups during a slow-but-working connect.
 
-### 3.2 Fix the "waiting for tile" UX (client)
+### 3.2 "Waiting for tile" UX ✅ DONE (this commit)
 Players experience **two stacked waits**: (1) connect, then (2) a "waiting for a tile" state. The
 second is the `isHotPathBusy` backpressure — when the render queue is deep, `give()` sends
-`{type:'wait'}` and the client retries `next`. Because ref-image mode is `immediate`, the drawing
-GUI is already on screen, so the waiting overlay (`#waiting-screen`, CSS at `player.html:73`,
-handler at `player.html:400`) doesn't read as intentional / isn't centred over the GUI. Make it a
-clear, centred overlay so the wait looks deliberate. (This wait is hugely exaggerated in the test
-because clients resubmit infinitely; a real event fills up and finishes, so it's mostly front-loaded
-during the opening rush.)
+`{type:'wait'}` and the client retries `next`. Previously the `'wait'` case showed **no dedicated
+UI** (only the pre-game `'waiting'` did), so with `ghostMode=immediate` the player saw a half-loaded
+drawing GUI. Now the `'wait'` handler shows the same centred full-screen overlay ("Almost there! /
+Finding you a piece to draw…"), hidden again on the next `'tile'`. (This wait is hugely exaggerated
+in the load test because clients resubmit infinitely; a real event fills up and finishes, so it's
+mostly front-loaded during the opening rush.)
 
 ### 3.3 Stagger the QR reveal (operational)
 Don't reveal the QR to all 20k at once. Release in waves (hall sections, then online cohorts) so the

@@ -162,8 +162,8 @@
 <div id="toast"></div>
 <div id="waiting-screen">
   <div class="pulse"></div>
-  <h2>Get ready!</h2>
-  <p>The game starts soon.<br>Keep this screen open.</p>
+  <h2 id="waitingTitle">Get ready!</h2>
+  <p id="waitingMsg">The game starts soon.<br>Keep this screen open.</p>
 </div>
 <div id="done">
   <h2>Thank you!</h2>
@@ -379,13 +379,16 @@ function connect() {
 
   // Connect watchdog: a socket can OPEN but never receive a first message when the
   // server is saturated and can't service the connection. Without this, the player
-  // is stuck on the black boot screen forever. If nothing arrives within 8s, tear it
+  // is stuck on the black boot screen forever. If nothing arrives within 25s, tear it
   // down so onclose schedules a retry instead of hanging.
+  // NOTE: 25s (not 8s) — under a real connection storm the TLS+WS handshake can take
+  // 10-20s while still succeeding. An 8s watchdog made phones bail on a working
+  // connection and reconnect, amplifying the storm. See HANDOFF_JAN.md §3.1.
   if (connectWatchdog) clearTimeout(connectWatchdog);
   connectWatchdog = setTimeout(() => {
     setBootMsg('Almost there — it’s very busy right now. Keep this screen open…');
     try { ws.close(); } catch (e) {}   // → onclose → reconnect with backoff
-  }, 8000);
+  }, 25000);
 
   ws.onmessage = ev => {
     dismissBoot();
@@ -398,6 +401,8 @@ function connect() {
       document.getElementById('waiting-screen').classList.remove('show');
       setTimeout(() => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); }, Math.random() * 2000);
     } else if (m.type === 'waiting') {
+      document.getElementById('waitingTitle').textContent = 'Get ready!';
+      document.getElementById('waitingMsg').innerHTML = 'The game starts soon.<br>Keep this screen open.';
       document.getElementById('waiting-screen').classList.add('show');
       // retry every 3s in case the open signal was missed
       setTimeout(function retry() {
@@ -431,6 +436,12 @@ function connect() {
       };
       img.src = m.refUrl + '?t=' + Date.now();
     } else if (m.type === 'wait') {
+      // Server is briefly at capacity (render queue busy) — show the same centred,
+      // full-screen overlay as the pre-game wait so the "finding a tile" pause reads
+      // as intentional instead of a half-loaded GUI. Hidden again on the next 'tile'.
+      document.getElementById('waitingTitle').textContent = 'Almost there!';
+      document.getElementById('waitingMsg').innerHTML = 'Finding you a piece to draw…<br>Keep this screen open.';
+      document.getElementById('waiting-screen').classList.add('show');
       setTimeout(() => ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: 'next' })), 2000);
     } else if (m.type === 'accepted') {
       // Submission accepted — if server signals a rate-limit delay, show countdown first.
