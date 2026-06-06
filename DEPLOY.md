@@ -292,6 +292,20 @@ curl https://YOUR_DOMAIN/api/config
 
 ## 11. Load test (Day 4 of the 5-day plan)
 
+> **Read `HANDOFF_JAN.md` first** — it has the results and root-cause analysis from the 2026-06-06
+> campaign. Key takeaways: the server is solid (7,000 clients, 0 errors, submit latency ~11 ms);
+> nginx/TLS is **not** the bottleneck (~15 % CPU under load); and the connect-latency numbers from
+> our small generators were largely a *generator* artifact, not the server.
+>
+> **Use real datacenter generators.** A single box caps near ~28k connections (ephemeral ports) and
+> a home-NAT'd laptop dies far earlier (router connection table) — both inflate the handshake/error
+> numbers and are not the server. For a true 20k test, use **2–3 Hetzner CX boxes** and fire them
+> together with `loadtest2.js --start-at`.
+>
+> **`loadtest2.js`** is the preferred tester (full lifecycle: page + ref fetch + WS + submit, with
+> separate ws/http/ref error buckets and handshake + first-tile latency). `loadtest-matrix.js` is the
+> scripted smoke→storm→realistic sweep.
+
 You need two cheap extra servers as load generators.  
 On Hetzner: add two **CX22** instances (€0.01/hr each). Delete them after testing.
 
@@ -299,8 +313,8 @@ On each CX22:
 ```bash
 apt-get install -y nodejs npm
 ulimit -n 100000
-# copy loadtest.js to this machine
-scp deploy@YOUR_SERVER_IP:/opt/crowd-canvas/loadtest.js .
+# copy the tester to this machine
+scp deploy@YOUR_SERVER_IP:/opt/crowd-canvas/loadtest2.js .
 npm install ws sharp
 ```
 
@@ -344,12 +358,14 @@ watch -n 2 'ss -s | grep estab'
 ## 12. Event day checklist
 
 **2 hours before doors open:**
-- [ ] `pm2 restart crowd-canvas` — fresh process
-- [ ] Open admin panel, upload the event image, slice it
+- [ ] `pm2 restart crowd-canvas` — fresh process (clears accumulated test submissions from RAM)
+- [ ] Confirm `pm2 describe crowd-canvas` shows `max memory restart` = 16 G and `restarts` near 0
+- [ ] Open admin panel, upload the event image, slice it (≈6000 pieces for ~5k playable tiles — see `HANDOFF_JAN.md` §4)
 - [ ] Check the tile overlay looks right
-- [ ] Open view screen on the projector laptop
+- [ ] Open view screen on the projector laptop — and **don't reload it mid-event** (10–30 s rebuild)
 - [ ] Confirm QR code shows and scans to the right URL
 - [ ] Do one manual draw on your phone end-to-end
+- [ ] **Plan a staggered reveal** (release the QR in waves, not all 20k at once) — biggest lever for the opening storm
 
 **30 minutes before:**
 - [ ] `pm2 logs crowd-canvas` — confirm no errors
@@ -381,12 +397,15 @@ watch -n 2 'ss -s | grep estab'
 
 ## Re-deploy after code changes
 
-```bash
-rsync -av --exclude node_modules --exclude data \
-  /Users/jacobs/Downloads/crowd-canvas-main/ \
-  deploy@YOUR_SERVER_IP:/opt/crowd-canvas/
+`/opt/crowd-canvas` is a git checkout tracking `origin/main`. Deploy via git — **not** ad-hoc rsync
+or manual edits (hand edits on the server once drifted from the repo and shipped a crash-looping
+build; see `HANDOFF_JAN.md` §1a).
 
-ssh deploy@YOUR_SERVER_IP 'cd /opt/crowd-canvas && npm install --omit=dev && pm2 restart crowd-canvas --update-env'
+```bash
+# develop → commit → push from your laptop, then on the server:
+ssh deploy@YOUR_SERVER_IP 'cd /opt/crowd-canvas && git pull && npm install --omit=dev && pm2 restart crowd-canvas --update-env'
 ```
 
-> Use `--update-env` so pm2 picks up any changes to `ecosystem.config.cjs` (including a rotated `ADMIN_TOKEN`).
+> Use `--update-env` so pm2 picks up changes to `ecosystem.config.cjs` (including a rotated
+> `ADMIN_TOKEN`). If you changed `max_memory_restart`, a plain restart won't pick it up — do
+> `pm2 delete crowd-canvas && pm2 start ecosystem.config.cjs && pm2 save`.

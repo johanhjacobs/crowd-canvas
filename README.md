@@ -98,13 +98,25 @@ automatically on first run; deleting it resets all sessions.
 
 ## Load testing
 
-`loadtest.js` simulates phones connecting, drawing, and submitting so you can rehearse a large
-event before the night. It only needs the `ws` package (already a dependency).
+> See **`HANDOFF_JAN.md`** for the 2026-06-06 load-test results, root-cause analysis (a crash loop
+> and a memory restart, both fixed), and the remaining client-side TODOs.
+
+Three testers ship with the project:
+
+- **`loadtest2.js`** (recommended) — full lifecycle per virtual player (page + ref fetch + WS +
+  submit), separate ws/http/ref error buckets, handshake + first-tile latency, and `--start-at` for
+  a synchronized multi-machine QR-reveal storm.
+- **`loadtest-matrix.js`** — scripted smoke → storm → realistic sweep with a PASS/WARN/FAIL summary.
+- **`loadtest.js`** — the original simple WS-only tester.
 
 ```bash
 ulimit -n 100000                                   # on the test machine
-node loadtest.js wss://draw.mmsparty.nl/ws --clients 5000 --rate 500 --tiles 3
+node loadtest2.js wss://draw.mmsparty.nl/ws --clients 7000 --rate 500 --duration 300
 ```
+
+> A single generator box caps near ~28k connections (ephemeral ports) and a home-NAT'd machine far
+> earlier — both inflate the numbers and are not the server. For a true 20k test use 2–3 datacenter
+> boxes fired together with `--start-at`.
 
 First slice a **test** image on the admin (this fills the mosaic with junk — don't run it against
 your live event), then watch `htop` and event-loop lag on the server. Key flags: `--clients`,
