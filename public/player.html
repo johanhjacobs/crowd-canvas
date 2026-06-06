@@ -6,7 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#000000">
 <!-- loading screen: renders immediately before any JS or external resources -->
-<style>html,body{margin:0;background:#000;}#boot{position:fixed;inset:0;background:#000;z-index:999;display:flex;align-items:center;justify-content:center;}</style>
+<style>html,body{margin:0;background:#000;}#boot{position:fixed;inset:0;background:#000;z-index:999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:0 32px;}#boot .spin{width:34px;height:34px;border:3px solid rgba(255,255,255,.18);border-top-color:#fff;border-radius:50%;animation:bootspin .8s linear infinite;}#bootMsg{color:rgba(255,255,255,.72);font:500 14px/1.5 -apple-system,system-ui,sans-serif;text-align:center;letter-spacing:.02em;max-width:300px;}@keyframes bootspin{to{transform:rotate(360deg)}}</style>
 <title>Crowd Canvas</title>
 <style>
   :root { --ink: #000; --paper: #fff; --bg: #e8e8e8; --send: #e0512f; }
@@ -25,6 +25,9 @@
     width: 100%; max-width: 520px; height: 100%;
     display: flex; flex-direction: column; align-items: center;
     padding: 8px; gap: 8px;
+  }
+  main.centered {
+    justify-content: center;
   }
   .card { border: none; display: inline-block; flex-shrink: 0; position: relative; }
   #drawCard { box-shadow: 0 0 0 2px #555; }
@@ -106,6 +109,17 @@
     pointer-events: none;
   }
   #retrievingOverlay.hidden { display: none; }
+  #rateLimitOverlay {
+    position: absolute; inset: 0; z-index: 26; border-radius: inherit;
+    background: rgba(0,0,0,0.72);
+    display: none; align-items: center; justify-content: center;
+    flex-direction: column; gap: 8px;
+    color: #fff; font-family: system-ui, sans-serif;
+    font-size: 15px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+    pointer-events: none;
+  }
+  #rateLimitOverlay.show { display: flex; }
+  #rateLimitOverlay .rl-count { font-size: 48px; font-weight: 800; line-height: 1; }
   #refCard.dim { opacity: 0.35; }
   .pulse { width: 12px; height: 12px; border-radius: 50%; background: var(--send);
     animation: pulse 1.4s ease-in-out infinite; }
@@ -125,13 +139,14 @@
 </style>
 </head>
 <body>
-<div id="boot"></div>
+<div id="boot"><div class="spin"></div><div id="bootMsg">Connecting…</div></div>
 <main id="main">
   <div class="card" id="refCard"><canvas id="ref"></canvas></div>
   <p id="hint">✏️ Copy this image on the canvas below</p>
   <div class="card" id="drawCard">
     <div id="resultFlash"></div>
     <div id="retrievingOverlay">⟳ Retrieving tile…</div>
+    <div id="rateLimitOverlay"><span>Next piece in…</span><span class="rl-count" id="rateLimitCount"></span></div>
     <div class="canvas-stack" id="drawStack">
       <canvas id="paper"></canvas>
       <div id="ghost"></div>
@@ -164,9 +179,44 @@ let INK = '#000000', PAPER = '#ffffff', SEND = '#e0512f';
 let simThreshold = 0.35;
 let maxStrayInk = 1.5;
 let minCoverage = 0.60;
+let rateLimit = 10;
+let ghostMode = 'attempt';
+let tileReceivedAt = 0;
 let similarityRetries = 0; // resets to 0 on each new tile
 let dpr = 1, tileSide = 0, drawSide = 0, bleedPx = 0;
 let tileId = null, drawing = false, pts = [];
+
+let rateLimitTimer = null;
+
+function maybeShowRateLimit() {
+  if (!rateLimit) return false;
+  const elapsed = Date.now() - tileReceivedAt;
+  const remaining = Math.ceil((rateLimit * 1000 - elapsed) / 1000);
+  if (remaining > 0) { showRateLimit(remaining); return true; }
+  return false;
+}
+
+function showRateLimit(seconds) {
+  const overlay = document.getElementById('rateLimitOverlay');
+  const count   = document.getElementById('rateLimitCount');
+  let remaining = seconds;
+  count.textContent = remaining;
+  overlay.classList.add('show');
+  setBusy(true);
+  if (rateLimitTimer) clearInterval(rateLimitTimer);
+  rateLimitTimer = setInterval(() => {
+    remaining--;
+    if (remaining > 0) {
+      count.textContent = remaining;
+    } else {
+      clearInterval(rateLimitTimer);
+      rateLimitTimer = null;
+      overlay.classList.remove('show');
+      setBusy(false);
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
+    }
+  }, 1000);
+}
 let curRef = null;
 
 const refCard  = document.getElementById('refCard');
@@ -310,15 +360,33 @@ function buildSubmitCanvas() {
 }
 
 // ── networking ────────────────────────────────────────────────────────────────
-let ws;
+let ws, connectWatchdog = null, reconnectAttempts = 0;
+function setBootMsg(t) { const el = document.getElementById('bootMsg'); if (el) el.textContent = t; }
 function dismissBoot() {
+  if (connectWatchdog) { clearTimeout(connectWatchdog); connectWatchdog = null; }
+  reconnectAttempts = 0;
   const b = document.getElementById('boot');
   if (b) { b.style.transition = 'opacity .3s'; b.style.opacity = '0'; setTimeout(() => b.remove(), 320); }
 }
 
 function connect() {
+  // drop any half-open previous socket so its handlers can't double-fire
+  if (ws) { try { ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null; ws.close(); } catch (e) {} }
+  if (reconnectAttempts > 0) setBootMsg('Reconnecting…');
+
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?role=player`);
+
+  // Connect watchdog: a socket can OPEN but never receive a first message when the
+  // server is saturated and can't service the connection. Without this, the player
+  // is stuck on the black boot screen forever. If nothing arrives within 8s, tear it
+  // down so onclose schedules a retry instead of hanging.
+  if (connectWatchdog) clearTimeout(connectWatchdog);
+  connectWatchdog = setTimeout(() => {
+    setBootMsg('Almost there — it’s very busy right now. Keep this screen open…');
+    try { ws.close(); } catch (e) {}   // → onclose → reconnect with backoff
+  }, 8000);
+
   ws.onmessage = ev => {
     dismissBoot();
     const m = JSON.parse(ev.data);
@@ -339,8 +407,11 @@ function connect() {
       }, 3000);
     } else if (m.type === 'config') {
       applyConfig(m);
+    } else if (m.type === 'rate-limited') {
+      showRateLimit(m.seconds);
     } else if (m.type === 'tile') {
       similarityRetries = 0; // fresh tile — reset retry counter
+      tileReceivedAt = Date.now();
       document.getElementById('waiting-screen').classList.remove('show');
       tileId = m.tileId; setBusy(false); clearDraw(); ghostClear(); updateTileUI();
 
@@ -348,27 +419,43 @@ function connect() {
       const hint = document.getElementById('hint');
       hint.textContent = m.fill === 0
         ? '⬛ This piece is fully black — scribble it all in!'
-        : '✏️ Copy this image on the canvas below';
+        : ghostMode === 'immediate'
+          ? '✏️ Trace the image on the canvas below'
+          : '✏️ Copy this image on the canvas below';
 
       const img = new Image();
       img.onload = () => {
         curRef = img; drawRef(img);
         document.getElementById('ghost').style.backgroundImage = `url(${img.src})`;
+        if (ghostMode === 'immediate') setGhostOpacity(0.40);
       };
       img.src = m.refUrl + '?t=' + Date.now();
     } else if (m.type === 'wait') {
-      toast('⏳ Looking for your next piece…');
       setTimeout(() => ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: 'next' })), 2000);
     } else if (m.type === 'accepted') {
-      toast('✅ Sent — nice work!');
-      setTimeout(() => ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: 'next' })), 900);
+      // Submission accepted — if server signals a rate-limit delay, show countdown first.
+      // showRateLimit() sends 'next' automatically when countdown ends.
+      if (m.rateLimitSeconds > 0) {
+        showRateLimit(m.rateLimitSeconds);
+      } else {
+        setTimeout(() => {
+          if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
+        }, 900);
+      }
     } else if (m.type === 'rejected') {
-      toast(m.reason === 'stray' ? '✗ Extra marks in empty space!' : '✏️ Draw something first!');
+      // Server rejected (rate limit bypass attempt) — just unlock so player can retry
       setBusy(false);
     }
   };
-  ws.onclose = () => setTimeout(connect, 2000);
-  ws.onerror  = () => ws.close();
+  ws.onclose = () => {
+    if (connectWatchdog) { clearTimeout(connectWatchdog); connectWatchdog = null; }
+    // Backoff with jitter so a roomful of phones doesn't reconnect in lockstep
+    // and recreate the very connection storm we're trying to ride out.
+    const delay = Math.min(5000, 600 * Math.pow(1.6, Math.min(reconnectAttempts, 5))) + Math.random() * 1200;
+    reconnectAttempts++;
+    setTimeout(connect, delay);
+  };
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
 }
 
 function showDone() {
@@ -399,6 +486,11 @@ function applyConfig(cfg) {
   if (cfg.similarityThreshold !== undefined) simThreshold = cfg.similarityThreshold;
   if (cfg.maxStrayInk !== undefined) maxStrayInk = cfg.maxStrayInk;
   if (cfg.minCoverage !== undefined) minCoverage = cfg.minCoverage;
+  if (cfg.rateLimit   !== undefined) rateLimit   = cfg.rateLimit;
+  if (cfg.ghostMode   !== undefined) {
+    ghostMode = cfg.ghostMode;
+    document.getElementById('main').classList.toggle('centered', ghostMode === 'immediate');
+  }
 }
 
 // ── similarity check — multi-scale soft IoU ───────────────────────────────────
@@ -637,6 +729,7 @@ function updateTileUI() {
   const hasTile = !!tileId;
   document.getElementById('retrievingOverlay').classList.toggle('hidden', hasTile);
   document.getElementById('refCard').classList.toggle('dim', !hasTile);
+  document.getElementById('refCard').style.display = ghostMode === 'immediate' ? 'none' : '';
   document.getElementById('clearBtn').disabled = !hasTile;
   document.getElementById('buttons').style.opacity = hasTile ? '' : '0.4';
 }
@@ -655,7 +748,8 @@ document.getElementById('clearBtn').addEventListener('click', clearDraw);
 let nextCooldownTimer = null;
 document.getElementById('nextBtn').addEventListener('click', () => {
   if (!ws || ws.readyState !== 1) return;
-  if (nextCooldownTimer) { toast('⏱ Wait a moment before skipping'); return; }
+  if (nextCooldownTimer) return;
+  if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
   tileId = null; updateTileUI(); setBusy(true);
   ws.send(JSON.stringify({ type: 'next' }));
   const btn = document.getElementById('nextBtn');
@@ -681,27 +775,30 @@ document.getElementById('submitBtn').addEventListener('click', () => {
   setBusy(true);
   const result = getSimilarityScore();
   if (result.blank) { // nothing meaningful drawn — same intent as the old server blank reject
-    toast('✏️ Draw something first!');
     setBusy(false);
     return;
   }
   showResultFlash(result, () => {
     if (result.label === 'partial') {
-      ghostFail();   // fade the tracing guide in so they can see what's missing
+      ghostFail();
       setBusy(false);
       return;
     }
     if (!result.ok) {
       similarityRetries++;
       if (similarityRetries <= 1) {
+        // first failure: always free retry, server will rate-limit if they submit too fast
         clearDraw();
         ghostHide();
         ghostFail();
         setBusy(false);
       } else {
-        setTimeout(() => {
-          if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
-        }, 1800);
+        // second failure: move to next tile, apply rate limit if needed
+        if (!maybeShowRateLimit()) {
+          setTimeout(() => {
+            if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
+          }, 1800);
+        }
       }
       return;
     }
@@ -710,10 +807,21 @@ document.getElementById('submitBtn').addEventListener('click', () => {
 });
 
 document.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+document.addEventListener('gesturestart', e => e.preventDefault(), { passive: false });
+document.addEventListener('gesturechange', e => e.preventDefault(), { passive: false });
+// prevent pinch zoom (2+ fingers)
+document.addEventListener('touchstart', e => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
+// prevent double-tap zoom
+let _lastTap = 0;
+document.addEventListener('touchend', e => {
+  const now = Date.now();
+  if (now - _lastTap < 300) e.preventDefault();
+  _lastTap = now;
+}, { passive: false });
 window.addEventListener('resize', () => requestAnimationFrame(setup));
 window.addEventListener('load',   () => requestAnimationFrame(() => {
   setup(); updateTileUI();
-  setTimeout(connect, Math.random() * 3000); // spread 10K simultaneous connects over 3s
+  setTimeout(connect, Math.random() * 500); // small jitter to avoid lockstep reconnects
 }));
 </script>
 </body>

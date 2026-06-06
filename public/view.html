@@ -193,7 +193,7 @@ function resize() {
   }
 }
 
-function paintTile(id, x, y, sz, png) {
+function paintTile(id, x, y, sz, version) {
   if (!tiles.has(id)) tiles.set(id, { x, y, sz, img: null });
   const entry = tiles.get(id);
   const img   = new Image();
@@ -202,7 +202,7 @@ function paintTile(id, x, y, sz, png) {
     ctx.drawImage(colorize(img, sz, sz), x, y, sz, sz);
     entry.img = img; // store original for resize / re-colorize
   };
-  img.src = png;
+  img.src = `/api/live-tile/${encodeURIComponent(id)}.png?v=${version}`;
 }
 
 function hexLuminance(hex) {
@@ -249,7 +249,7 @@ function connect() {
       resize();
       seedFromServer();
     }
-    else if (m.type === 'tile-update') { paintTile(m.tileId, m.x, m.y, m.sz, m.png); }
+    else if (m.type === 'tile-update') { paintTile(m.tileId, m.x, m.y, m.sz, m.version || 0); }
     else if (m.type === 'tile-cleared') {
       tiles.delete(m.tileId);
       ctx.fillStyle = tileFill; ctx.fillRect(m.x, m.y, m.sz, m.sz);

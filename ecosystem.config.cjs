@@ -12,11 +12,11 @@ module.exports = {
       HOST: '127.0.0.1',
       // Generate once with: openssl rand -hex 32
       // Keep this secret — it protects all admin and view endpoints.
-      ADMIN_TOKEN: 'ce4ce73cf27a27632f7e1924be3f99fc8b586e6614b88354f0e6d44d711871b8',
+      ADMIN_TOKEN: '92b437d9d8f65e6f494a5eae64bfa2e9cf9cc6e02114b6fb1b2d92ec2395d3fc',
       // Sharp uses libuv's thread pool for all native async ops.
       // Default is 4 threads — far too low for 600 concurrent Sharp decodes/second.
       // On an AX102 (16 cores / 32 threads) 16 is a safe, well-benchmarked value.
-      UV_THREADPOOL_SIZE: 16,
+      UV_THREADPOOL_SIZE: 8,
     },
     // AX102 has 128 GB RAM; the accumulator for 5000 tiles peaks at ~1.3 GB.
     // Set ceiling well above that so PM2 doesn't restart mid-event.
