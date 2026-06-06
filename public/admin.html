@@ -185,11 +185,12 @@
     </div>
     <div class="card" style="margin-top:16px;">
       <h2>Colors</h2>
-      <label>Player colors</label>
+      <label>Player colors <span style="text-transform:none;letter-spacing:0;color:var(--muted);">(background fixed black, text white)</span></label>
       <div class="row">
         <div><label>Ink (brush)</label><input type="color" id="cInk" value="#000000"></div>
         <div><label>Paper (canvas)</label><input type="color" id="cPaper" value="#ffffff"></div>
-        <div><label>App background</label><input type="color" id="cCanvas" value="#f3ede1"></div>
+        <div><label>Clear button</label><input type="color" id="cClear" value="#444444"></div>
+        <div><label>New-piece button</label><input type="color" id="cNext" value="#1f6feb"></div>
         <div><label>Send button</label><input type="color" id="cSend" value="#e0512f"></div>
       </div>
       <button class="btn ghost sm" id="saveColors">Apply colors to players</button>
@@ -646,9 +647,10 @@ function applyConfigUI(cfg) {
   if (cfg.defaultIncludeSolidBlack !== undefined) document.getElementById('includeSolid').checked = !!cfg.defaultIncludeSolidBlack;
   if (cfg.viewBgColor || cfg.viewTextColor || cfg.viewTileColor || cfg.viewInkColor || cfg.viewPaperColor)
     applyViewColorsAdmin(cfg.viewBgColor, cfg.viewTextColor, cfg.viewTileColor, cfg.viewInkColor, cfg.viewPaperColor);
-  if (cfg.inkColor)    document.getElementById('cInk').value    = cfg.inkColor;
-  if (cfg.paperColor)  document.getElementById('cPaper').value  = cfg.paperColor;
-  if (cfg.canvasColor) document.getElementById('cCanvas').value = cfg.canvasColor;
+  if (cfg.inkColor)      document.getElementById('cInk').value   = cfg.inkColor;
+  if (cfg.paperColor)    document.getElementById('cPaper').value = cfg.paperColor;
+  if (cfg.btnClearColor) document.getElementById('cClear').value = cfg.btnClearColor;
+  if (cfg.btnNextColor)  document.getElementById('cNext').value  = cfg.btnNextColor;
   if (cfg.similarityThreshold !== undefined) {
     document.getElementById('simSlider').value = cfg.similarityThreshold;
     document.getElementById('simVal').textContent = cfg.similarityThreshold === 0 ? 'off' : Math.round(cfg.similarityThreshold * 100) + '%';
@@ -685,7 +687,7 @@ function applyConfigUI(cfg) {
 }
 document.getElementById('saveColors').addEventListener('click', async () => {
   await afetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ inkColor: document.getElementById('cInk').value, paperColor: document.getElementById('cPaper').value, canvasColor: document.getElementById('cCanvas').value, sendColor: document.getElementById('cSend').value }) });
+    body: JSON.stringify({ inkColor: document.getElementById('cInk').value, paperColor: document.getElementById('cPaper').value, btnClearColor: document.getElementById('cClear').value, btnNextColor: document.getElementById('cNext').value, sendColor: document.getElementById('cSend').value }) });
 });
 
 // ── blend ─────────────────────────────────────────────────────────────────────

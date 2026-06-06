@@ -9,7 +9,9 @@
 <style>html,body{margin:0;background:#000;}#boot{position:fixed;inset:0;background:#000;z-index:999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:0 32px;}#boot .spin{width:34px;height:34px;border:3px solid rgba(255,255,255,.18);border-top-color:#fff;border-radius:50%;animation:bootspin .8s linear infinite;}#bootMsg{color:rgba(255,255,255,.72);font:500 14px/1.5 -apple-system,system-ui,sans-serif;text-align:center;letter-spacing:.02em;max-width:300px;}@keyframes bootspin{to{transform:rotate(360deg)}}</style>
 <title>Crowd Canvas</title>
 <style>
-  :root { --ink: #000; --paper: #fff; --bg: #e8e8e8; --send: #e0512f; }
+  /* --bg fixed black + white text on purpose; only the buttons are themeable.
+     --ink = drawing brush (stays black on white --paper). */
+  :root { --ink: #000; --paper: #fff; --bg: #000; --send: #e0512f; --btn-clear: #444; --btn-next: #1f6feb; }
   *, *::before, *::after {
     box-sizing: border-box;
     -webkit-tap-highlight-color: transparent;
@@ -37,7 +39,7 @@
   #ref { display: block; }
   #hint {
     margin: 6px 0 4px; font-size: 11px; text-transform: uppercase;
-    letter-spacing: .1em; color: var(--ink); opacity: .7; text-align: center;
+    letter-spacing: .1em; color: #fff; opacity: .7; text-align: center;
   }
   #ghost {
     position: absolute;
@@ -52,10 +54,12 @@
   #draw { z-index: 3; }
   .buttons { display: flex; gap: 6px; flex-shrink: 0; }
   .btn {
-    flex: 1; padding: 13px 8px; border: 2px solid var(--ink); border-radius: 0;
-    background: var(--ink); color: #fff; cursor: pointer;
+    flex: 1; padding: 13px 8px; border: 2px solid transparent; border-radius: 0;
+    background: #444; color: #fff; cursor: pointer;
     font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em;
   }
+  #clearBtn { background: var(--btn-clear); border-color: var(--btn-clear); }
+  #nextBtn  { background: var(--btn-next);  border-color: var(--btn-next); }
   .btn:active { opacity: .75; }
   .btn:disabled { opacity: .35; pointer-events: none; }
   /* New-piece cooldown: grey at start, ink colour fills left-to-right over 8 s */
@@ -64,14 +68,14 @@
     to   { background-position:   0% 0; }
   }
   #nextBtn.cooling {
-    background-image: linear-gradient(to right, var(--ink) 50%, #888 50%);
+    background-image: linear-gradient(to right, var(--btn-next) 50%, #888 50%);
     background-size: 200% 100%;
     background-position: 100% 0;
     animation: next-cooldown 5s linear forwards;
   }
   #submitBtn { background: var(--send); border-color: var(--send); }
   #waiting-screen, #done {
-    position: fixed; inset: 0; background: var(--ink); color: #fff;
+    position: fixed; inset: 0; background: #000; color: #fff;
     display: none; flex-direction: column; align-items: center; justify-content: center;
     text-align: center; padding: 32px; gap: 16px; z-index: 50;
   }
@@ -539,8 +543,10 @@ function loadDoneThumb() {
 function applyConfig(cfg) {
   if (cfg.inkColor)    { INK = cfg.inkColor;  document.documentElement.style.setProperty('--ink', INK); paintPaper(); }
   if (cfg.paperColor)  { PAPER = cfg.paperColor; document.documentElement.style.setProperty('--paper', PAPER); paintPaper(); }
-  if (cfg.canvasColor) document.documentElement.style.setProperty('--bg', cfg.canvasColor);
-  if (cfg.sendColor)   { SEND = cfg.sendColor; document.documentElement.style.setProperty('--send', SEND); }
+  // canvasColor intentionally ignored — player background is fixed black.
+  if (cfg.sendColor)     { SEND = cfg.sendColor; document.documentElement.style.setProperty('--send', SEND); }
+  if (cfg.btnClearColor) document.documentElement.style.setProperty('--btn-clear', cfg.btnClearColor);
+  if (cfg.btnNextColor)  document.documentElement.style.setProperty('--btn-next', cfg.btnNextColor);
   if (cfg.similarityThreshold !== undefined) simThreshold = cfg.similarityThreshold;
   if (cfg.maxStrayInk !== undefined) maxStrayInk = cfg.maxStrayInk;
   if (cfg.minCoverage !== undefined) minCoverage = cfg.minCoverage;

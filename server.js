@@ -240,7 +240,11 @@ const DEFAULT_CONFIG = {
   blendMode: 'blend',    // 'blend' | 'random' | 'first'
   blendGamma: 1.71,
   liveMinPixelVotes: 0,   // live view only: hide pixels drawn by <= this many players
-  sendColor: '#e0512f',
+  sendColor: '#e0512f',      // Send button
+  btnClearColor: '#444444',  // Clear button
+  btnNextColor:  '#1f6feb',  // New-piece button
+  // Player page background is now fixed black with white text (canvasColor no longer
+  // drives it) so the audience screen can't end up with odd colour combinations.
   admitRate: 500,             // new players admitted per second (connection queue drain rate)
   rateLimit: 10,              // minimum seconds between submissions per player (0=off)
   ghostMode: 'attempt',      // 'attempt' = show after first failed try | 'immediate' = show right away
