@@ -377,6 +377,24 @@ function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?role=player`);
 
+  // ── connect timing instrumentation (debug — remove once join speed is solved) ──
+  // Splits the "Connecting" time into phases so we can see WHERE a slow join hangs:
+  //   page   = HTML+TCP+TLS of the page load (Navigation Timing)
+  //   ws-open= time to open the WebSocket socket (its own TCP+TLS+upgrade)
+  //   1st-msg= socket-open → server's first message (Node running give())
+  // Live clock shows on the boot screen; a precise breakdown is logged to the console
+  // (read via Safari → Develop → [iPhone]).
+  const tConnectStart = performance.now();
+  let _wsOpenAt = 0, _firstMsgLogged = false;
+  if (window._connTick) clearInterval(window._connTick);
+  window._connTick = setInterval(() => {
+    if (!document.getElementById('boot')) { clearInterval(window._connTick); return; }
+    const s = ((performance.now() - tConnectStart) / 1000).toFixed(1);
+    setBootMsg(_wsOpenAt ? `Connecting… ${s}s (socket open, waiting for server)`
+                         : `Connecting… ${s}s (opening socket)`);
+  }, 200);
+  ws.onopen = () => { _wsOpenAt = performance.now(); };
+
   // Connect watchdog: a socket can OPEN but never receive a first message when the
   // server is saturated and can't service the connection. Without this, the player
   // is stuck on the black boot screen forever. If nothing arrives within 25s, tear it
@@ -391,6 +409,16 @@ function connect() {
   }, 25000);
 
   ws.onmessage = ev => {
+    if (!_firstMsgLogged) {
+      _firstMsgLogged = true;
+      if (window._connTick) clearInterval(window._connTick);
+      const nav = performance.getEntriesByType ? performance.getEntriesByType('navigation')[0] : null;
+      const pageMs = nav ? Math.round(nav.responseEnd - nav.startTime) : -1;
+      const tlsMs  = nav && nav.secureConnectionStart ? Math.round(nav.connectEnd - nav.secureConnectionStart) : -1;
+      const wsOpenMs   = _wsOpenAt ? Math.round(_wsOpenAt - tConnectStart) : -1;
+      const firstMsgMs = _wsOpenAt ? Math.round(performance.now() - _wsOpenAt) : -1;
+      console.log(`[conn] page=${pageMs}ms tls=${tlsMs}ms ws-open=${wsOpenMs}ms first-msg=${firstMsgMs}ms total=${Math.round(performance.now()-tConnectStart)}ms`);
+    }
     dismissBoot();
     const m = JSON.parse(ev.data);
     if (m.type === 'done') {
