@@ -252,7 +252,7 @@ const DEFAULT_CONFIG = {
   btnNextColor:  '#1f6feb',  // New-piece button
   // Player page background is now fixed black with white text (canvasColor no longer
   // drives it) so the audience screen can't end up with odd colour combinations.
-  admitRate: 500,             // new players admitted per second (connection queue drain rate)
+  admitRate: 800,             // NEW players admitted into the game per second (admission governor)
   rateLimit: 10,              // minimum seconds between submissions per player (0=off)
   ghostMode: 'attempt',      // 'attempt' = show after first failed try | 'immediate' = show right away
   similarityThreshold: 0.35, // recall threshold 0=off; 0.25 works well for most images
@@ -975,7 +975,8 @@ app.post('/api/session', upload.single('image'), async (req, res) => {
     const r = await slice(buffer, pieces, redundancy, includeSolidBlack);
     broadcastAdmins({ type: 'reset', ...adminState() });
     broadcastViews({ type: 'reset', ...viewInitData() });
-    releaseWaitingPlayers();
+    // No explicit release — the admission governor drains `waiting` at admitRate
+    // once `state` is active (paced ramp instead of a single dump).
     res.json(r);
   } catch (e) { console.error(e); res.status(500).json({ error: String(e) }); }
 });
@@ -1011,7 +1012,8 @@ app.post('/api/session/restart', (_, res) => {
   broadcastAdmins({ type: 'reset', ...adminState() });
   broadcastViews({ type: 'reset', ...viewInitData() });
   broadcastViews({ type: 'view-sync' });
-  releaseWaitingPlayers();
+  // Active players re-request via the 'resume' broadcast above; any still-queued
+  // players are drained by the admission governor.
   res.json({ ok: true, tiles: state.tiles.size });
 });
 
@@ -1342,7 +1344,7 @@ function adminState() {
   const cnt = new Map(subs.map(s => [s.tile, s.n]));
   return {
     active: true, done: state.done, size: state.size, redundancy: state.redundancy, imgW: state.imgW, imgH: state.imgH,
-    waitingCount: waiting.size, viewMode, viewDelay, viewSidebarWidth, viewPath: VIEW_PATH,
+    waitingCount: waiting.size, admitQueueSize: waiting.size, viewMode, viewDelay, viewSidebarWidth, viewPath: VIEW_PATH,
     tiles: [...state.tiles.values()].map(t => ({ id: t.id, x: t.x, y: t.y, sz: t.sz, subs: cnt.get(t.id) || 0 })),
     blanks: state.blanks,
   };
@@ -1382,24 +1384,61 @@ const broadcastAdmins  = o => bcast(admins, o);
 const broadcastViews   = o => bcast(views, o);
 const broadcastPlayers = o => bcast(players, o);
 
-// open the game: release all waiting players in batches to keep event loop responsive
-function releaseWaitingPlayers(batchSize = 200) {
-  if (!waiting.size) return;
-  const queued = [...waiting.entries()];
-  let i = 0;
-  const step = () => {
-    let n = 0;
-    while (i < queued.length && n < batchSize) {
-      const [ws, give] = queued[i++];
-      waiting.delete(ws);
-      if (ws.readyState === 1) give();
-      n++;
-    }
-    broadcastAdmins({ type: 'waiting-count', count: waiting.size });
-    if (i < queued.length) setTimeout(step, 10);
-  };
-  step();
+// ── admission governor ────────────────────────────────────────────────────────
+// New players are admitted into the game at a steady rate (admitRate/sec) so a
+// 20k QR-scan storm ramps in smoothly instead of all starting to draw at once.
+// nginx accepts the TCP/WS connections; THIS paces how fast each connected player
+// is handed their first tile. It is IP-agnostic — it counts connections, not
+// source IPs — so it behaves identically whether the audience is behind one
+// venue-WiFi NAT or on 20k separate mobile IPs. `waiting` is the single admission
+// queue (also used to hold players who connect before the image is sliced).
+//
+// Only the FIRST admission is governed; once a player has a tile (`ws._admitted`),
+// their subsequent `next` requests bypass the governor so active play never stalls.
+// `isHotPathBusy()` (render-queue depth) still gates admission on top of the rate,
+// so we never admit into an overloaded render pipeline.
+const ADMIT_TICK_MS = 100;      // drain the queue 10×/second
+let admitTokens = 0;            // available admissions right now (token bucket)
+let _queueBroadcastCountdown = 0;
+
+function admitRatePerSec() {
+  const r = Number(getConfig().admitRate);
+  return Number.isFinite(r) && r > 0 ? r : 800;
 }
+
+// Give a free slot immediately if one is available, otherwise hold in the queue.
+function admitOrQueue(ws, give, send) {
+  if (state && !state.done && !isHotPathBusy() && admitTokens >= 1) {
+    admitTokens -= 1;
+    waiting.delete(ws);
+    give();                     // give() sets ws._admitted once a real tile goes out
+    return;
+  }
+  if (!waiting.has(ws)) waiting.set(ws, give);
+  // 'wait' = game running but at the rate cap; 'waiting' = no session yet (pre-slice).
+  send({ type: state && !state.done ? 'wait' : 'waiting' });
+}
+
+// Refill tokens and drain the admission queue at admitRate/sec.
+setInterval(() => {
+  const rate = admitRatePerSec();
+  admitTokens = Math.min(rate, admitTokens + rate * ADMIT_TICK_MS / 1000); // burst cap = 1s
+  if (state && !state.done) {
+    while (admitTokens >= 1 && waiting.size > 0 && !isHotPathBusy()) {
+      const ws = waiting.keys().next().value;
+      const give = waiting.get(ws);
+      waiting.delete(ws);
+      if (!ws || ws.readyState !== 1) continue; // dead socket — don't spend a token
+      admitTokens -= 1;
+      give();
+    }
+  }
+  // Throttle the admin queue-size broadcast to ~1/sec (no per-player spam in a storm).
+  if (--_queueBroadcastCountdown <= 0) {
+    _queueBroadcastCountdown = Math.round(1000 / ADMIT_TICK_MS);
+    broadcastAdmins({ type: 'waiting-count', count: waiting.size });
+  }
+}, ADMIT_TICK_MS);
 
 async function finishSession() {
   if (!state || state.done) return;
@@ -1704,41 +1743,37 @@ wss.on('connection', (ws, req) => {
     const t = assignTile(submittedCount > 0); // only veterans get solid black tiles
     if (!t) { send({ type: 'wait' }); return; }
     currentTileId = t.id;
+    ws._admitted = true; // first real tile → admitted; future 'next' bypasses the governor
     ws._tileReceivedAt = Date.now();
     send({ type: 'tile', tileId: t.id, refUrl: '/refs/' + t.id + '.png', fill: t.fill ?? 255 });
   };
 
-  // always give a tile if a session is active
+  // New player: route through the admission governor (paces first-tile handout at
+  // admitRate/sec, and holds them pre-slice). admitOrQueue gives a tile immediately
+  // if a slot is free, otherwise the drain timer admits them in turn.
   if (state && state.done) {
     send({ type: 'done' }); // game finished — no point queuing them
-  } else if (state && !state.done) {
-    give(); // give tile immediately; isHotPathBusy() provides backpressure if server is overloaded
   } else {
-    waiting.set(ws, give);
-    send({ type: 'waiting' });
-    broadcastAdmins({ type: 'waiting-count', count: waiting.size });
+    admitOrQueue(ws, give, send);
   }
 
   ws.on('message', async raw => {
     let m; try { m = JSON.parse(raw); } catch { return; }
     if (m.type === 'next') {
-      // Rate-limit abandonment: if the player already holds a tile and is skipping it,
-      // enforce an 8-second cooldown. Auto-next after a successful submission is fine
-      // (currentTileId is already null by then because releaseCurrentTile was called).
-      if (currentTileId) {
-        const now = Date.now();
-        if (ws._lastAbandon && now - ws._lastAbandon < 5000) return; // silently drop
-        ws._lastAbandon = now;
-      }
-      waiting.delete(ws);
-      if (state && state.done) {
-        send({ type: 'done' });
-      } else if (state && !state.done) {
+      if (state && state.done) { send({ type: 'done' }); return; }
+      if (ws._admitted) {
+        // Already in the game — hand the next tile directly (NOT rate-governed, so
+        // active play never stalls). Cooldown only if they're skipping a held tile.
+        if (currentTileId) {
+          const now = Date.now();
+          if (ws._lastAbandon && now - ws._lastAbandon < 5000) return; // silently drop
+          ws._lastAbandon = now;
+        }
         give();
       } else {
-        waiting.set(ws, give);
-        send({ type: 'waiting' });
-        broadcastAdmins({ type: 'waiting-count', count: waiting.size });
+        // Not admitted yet (pre-game / still queued, client retries 'next') — keep
+        // them in the admission governor instead of letting 'next' jump the queue.
+        admitOrQueue(ws, give, send);
       }
       return;
     }
@@ -1789,9 +1824,9 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     releaseCurrentTile(); // free the tile so another player can pick it up
     players.delete(ws);
+    waiting.delete(ws);   // drop from the admission queue if still waiting
     broadcastPlayerCount();
-    broadcastStats();
-    if (waiting.delete(ws)) broadcastAdmins({ type: 'waiting-count', count: waiting.size });
+    broadcastStats();      // queue-size goes out on the governor's throttled ~1/s broadcast
   });
 });
 
