@@ -6,12 +6,10 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#000000">
 <!-- loading screen: renders immediately before any JS or external resources -->
-<style>html,body{margin:0;background:#000;}#boot{position:fixed;inset:0;background:#000;z-index:999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:0 32px;}#boot .spin{width:34px;height:34px;border:3px solid rgba(255,255,255,.18);border-top-color:#fff;border-radius:50%;animation:bootspin .8s linear infinite;}#bootMsg{color:rgba(255,255,255,.72);font:500 14px/1.5 -apple-system,system-ui,sans-serif;text-align:center;letter-spacing:.02em;max-width:300px;}@keyframes bootspin{to{transform:rotate(360deg)}}</style>
+<style>html,body{margin:0;background:#000;}#boot{position:fixed;inset:0;background:#000;z-index:999;display:flex;align-items:center;justify-content:center;}</style>
 <title>Crowd Canvas</title>
 <style>
-  /* --bg fixed black + white text on purpose; only the buttons are themeable.
-     --ink = drawing brush (stays black on white --paper). */
-  :root { --ink: #000; --paper: #fff; --bg: #000; --send: #e0512f; --btn-clear: #444; --btn-next: #1f6feb; }
+  :root { --ink: #000; --paper: #fff; --bg: #e8e8e8; --send: #e0512f; }
   *, *::before, *::after {
     box-sizing: border-box;
     -webkit-tap-highlight-color: transparent;
@@ -28,9 +26,6 @@
     display: flex; flex-direction: column; align-items: center;
     padding: 8px; gap: 8px;
   }
-  main.centered {
-    justify-content: center;
-  }
   .card { border: none; display: inline-block; flex-shrink: 0; position: relative; }
   #drawCard { box-shadow: 0 0 0 2px #555; }
   .canvas-stack { position: relative; display: block; }
@@ -39,7 +34,7 @@
   #ref { display: block; }
   #hint {
     margin: 6px 0 4px; font-size: 11px; text-transform: uppercase;
-    letter-spacing: .1em; color: #fff; opacity: .7; text-align: center;
+    letter-spacing: .1em; color: var(--ink); opacity: .7; text-align: center;
   }
   #ghost {
     position: absolute;
@@ -54,12 +49,10 @@
   #draw { z-index: 3; }
   .buttons { display: flex; gap: 6px; flex-shrink: 0; }
   .btn {
-    flex: 1; padding: 13px 8px; border: 2px solid transparent; border-radius: 0;
-    background: #444; color: #fff; cursor: pointer;
+    flex: 1; padding: 13px 8px; border: 2px solid var(--ink); border-radius: 0;
+    background: var(--ink); color: #fff; cursor: pointer;
     font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .07em;
   }
-  #clearBtn { background: var(--btn-clear); border-color: var(--btn-clear); }
-  #nextBtn  { background: var(--btn-next);  border-color: var(--btn-next); }
   .btn:active { opacity: .75; }
   .btn:disabled { opacity: .35; pointer-events: none; }
   /* New-piece cooldown: grey at start, ink colour fills left-to-right over 8 s */
@@ -68,14 +61,14 @@
     to   { background-position:   0% 0; }
   }
   #nextBtn.cooling {
-    background-image: linear-gradient(to right, var(--btn-next) 50%, #888 50%);
+    background-image: linear-gradient(to right, var(--ink) 50%, #888 50%);
     background-size: 200% 100%;
     background-position: 100% 0;
     animation: next-cooldown 5s linear forwards;
   }
   #submitBtn { background: var(--send); border-color: var(--send); }
   #waiting-screen, #done {
-    position: fixed; inset: 0; background: #000; color: #fff;
+    position: fixed; inset: 0; background: var(--ink); color: #fff;
     display: none; flex-direction: column; align-items: center; justify-content: center;
     text-align: center; padding: 32px; gap: 16px; z-index: 50;
   }
@@ -113,17 +106,6 @@
     pointer-events: none;
   }
   #retrievingOverlay.hidden { display: none; }
-  #rateLimitOverlay {
-    position: absolute; inset: 0; z-index: 26; border-radius: inherit;
-    background: rgba(0,0,0,0.72);
-    display: none; align-items: center; justify-content: center;
-    flex-direction: column; gap: 8px;
-    color: #fff; font-family: system-ui, sans-serif;
-    font-size: 15px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
-    pointer-events: none;
-  }
-  #rateLimitOverlay.show { display: flex; }
-  #rateLimitOverlay .rl-count { font-size: 48px; font-weight: 800; line-height: 1; }
   #refCard.dim { opacity: 0.35; }
   .pulse { width: 12px; height: 12px; border-radius: 50%; background: var(--send);
     animation: pulse 1.4s ease-in-out infinite; }
@@ -143,14 +125,13 @@
 </style>
 </head>
 <body>
-<div id="boot"><div class="spin"></div><div id="bootMsg">Connecting…</div></div>
+<div id="boot"></div>
 <main id="main">
   <div class="card" id="refCard"><canvas id="ref"></canvas></div>
   <p id="hint">✏️ Copy this image on the canvas below</p>
   <div class="card" id="drawCard">
     <div id="resultFlash"></div>
     <div id="retrievingOverlay">⟳ Retrieving tile…</div>
-    <div id="rateLimitOverlay"><span>Next piece in…</span><span class="rl-count" id="rateLimitCount"></span></div>
     <div class="canvas-stack" id="drawStack">
       <canvas id="paper"></canvas>
       <div id="ghost"></div>
@@ -166,18 +147,14 @@
 <div id="toast"></div>
 <div id="waiting-screen">
   <div class="pulse"></div>
-  <h2 id="waitingTitle">Get ready!</h2>
-  <p id="waitingMsg">The game starts soon.<br>Keep this screen open.</p>
+  <h2>Get ready!</h2>
+  <p>The game starts soon.<br>Keep this screen open.</p>
 </div>
 <div id="done">
   <h2>Thank you!</h2>
   <p>The final mosaic is ready.<br>Tap it to download the full version.</p>
-  <!-- No src/href here on purpose: /api/export-thumb.png and /api/export.png are
-       expensive Node-built images. A hardcoded src made EVERY player page-load fetch
-       the thumbnail (~16s under load → competes with WS handling on Node's thread and
-       made joins feel slow). loadDoneThumb() sets both only when the game is done. -->
-  <a id="finalLink" download="crowd-canvas.png">
-    <img id="finalThumb" alt="Final mosaic">
+  <a id="finalLink" href="/api/final-view.png" download="crowd-canvas.png">
+    <img id="finalThumb" src="/api/final-view-thumb.png" alt="Final mosaic">
     <span>Download full image</span>
   </a>
 </div>
@@ -187,44 +164,9 @@ let INK = '#000000', PAPER = '#ffffff', SEND = '#e0512f';
 let simThreshold = 0.35;
 let maxStrayInk = 1.5;
 let minCoverage = 0.60;
-let rateLimit = 10;
-let ghostMode = 'attempt';
-let tileReceivedAt = 0;
 let similarityRetries = 0; // resets to 0 on each new tile
 let dpr = 1, tileSide = 0, drawSide = 0, bleedPx = 0;
 let tileId = null, drawing = false, pts = [];
-
-let rateLimitTimer = null;
-
-function maybeShowRateLimit() {
-  if (!rateLimit) return false;
-  const elapsed = Date.now() - tileReceivedAt;
-  const remaining = Math.ceil((rateLimit * 1000 - elapsed) / 1000);
-  if (remaining > 0) { showRateLimit(remaining); return true; }
-  return false;
-}
-
-function showRateLimit(seconds) {
-  const overlay = document.getElementById('rateLimitOverlay');
-  const count   = document.getElementById('rateLimitCount');
-  let remaining = seconds;
-  count.textContent = remaining;
-  overlay.classList.add('show');
-  setBusy(true);
-  if (rateLimitTimer) clearInterval(rateLimitTimer);
-  rateLimitTimer = setInterval(() => {
-    remaining--;
-    if (remaining > 0) {
-      count.textContent = remaining;
-    } else {
-      clearInterval(rateLimitTimer);
-      rateLimitTimer = null;
-      overlay.classList.remove('show');
-      setBusy(false);
-      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
-    }
-  }, 1000);
-}
 let curRef = null;
 
 const refCard  = document.getElementById('refCard');
@@ -368,80 +310,16 @@ function buildSubmitCanvas() {
 }
 
 // ── networking ────────────────────────────────────────────────────────────────
-let ws, connectWatchdog = null, reconnectAttempts = 0;
-function setBootMsg(t) { const el = document.getElementById('bootMsg'); if (el) el.textContent = t; }
+let ws;
 function dismissBoot() {
-  if (connectWatchdog) { clearTimeout(connectWatchdog); connectWatchdog = null; }
-  reconnectAttempts = 0;
   const b = document.getElementById('boot');
   if (b) { b.style.transition = 'opacity .3s'; b.style.opacity = '0'; setTimeout(() => b.remove(), 320); }
 }
 
 function connect() {
-  // drop any half-open previous socket so its handlers can't double-fire
-  if (ws) { try { ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null; ws.close(); } catch (e) {} }
-  if (reconnectAttempts > 0) setBootMsg('Reconnecting…');
-
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?role=player`);
-
-  // ── nerdy boot HUD ─────────────────────────────────────────────────────────
-  // Live per-phase connect readout on the boot screen (page / TLS / ws-socket /
-  // server) + a precise [conn] line to the console. Doubles as diagnostics: if a
-  // join is ever slow again you can see exactly which phase hangs.
-  const tConnectStart = performance.now();
-  let _wsOpenAt = 0, _firstMsgLogged = false;
-  const _nav = performance.getEntriesByType ? performance.getEntriesByType('navigation')[0] : null;
-  const _pageMs = _nav ? Math.round(_nav.responseEnd - _nav.startTime) : -1;
-  const _tlsMs  = _nav && _nav.secureConnectionStart ? Math.round(_nav.connectEnd - _nav.secureConnectionStart) : -1;
-  const _fmt = ms => ms < 0 ? '—' : (ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms');
-  function _hud(done) {
-    const el = document.getElementById('bootMsg');
-    if (!el) return;
-    const now = performance.now();
-    const sockMs = _wsOpenAt ? Math.round(_wsOpenAt - tConnectStart) : Math.round(now - tConnectStart);
-    const srvMs  = _wsOpenAt ? Math.round(now - _wsOpenAt) : 0;
-    const row = (ok, label, val, sub) =>
-      `<div>[${ok ? '✓' : '·'}] ${label.padEnd(9)} ${val}${sub ? ' <span style="opacity:.55">' + sub + '</span>' : ''}</div>`;
-    el.innerHTML =
-      `<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.7;text-align:left;white-space:pre;opacity:.9">`
-      + `<div style="opacity:.7">${done ? 'crowd-canvas online ✓' : 'booting crowd-canvas…'}</div>`
-      + row(true, 'page', _fmt(_pageMs), 'tls ' + _fmt(_tlsMs))
-      + row(!!_wsOpenAt, 'ws socket', _fmt(sockMs) + (_wsOpenAt || done ? '' : ' …'))
-      + row(done, 'server', _wsOpenAt ? _fmt(srvMs) + (done ? '' : ' …') : '—')
-      + `</div>`;
-  }
-  if (window._connTick) clearInterval(window._connTick);
-  window._connTick = setInterval(() => {
-    if (!document.getElementById('boot')) { clearInterval(window._connTick); return; }
-    _hud(false);
-  }, 100);
-  _hud(false);
-  ws.onopen = () => { _wsOpenAt = performance.now(); _hud(false); };
-
-  // Connect watchdog: a socket can OPEN but never receive a first message when the
-  // server is saturated and can't service the connection. Without this, the player
-  // is stuck on the black boot screen forever. If nothing arrives within 25s, tear it
-  // down so onclose schedules a retry instead of hanging.
-  // NOTE: 25s (not 8s) — under a real connection storm the TLS+WS handshake can take
-  // 10-20s while still succeeding. An 8s watchdog made phones bail on a working
-  // connection and reconnect, amplifying the storm. See HANDOFF_JAN.md §3.1.
-  if (connectWatchdog) clearTimeout(connectWatchdog);
-  connectWatchdog = setTimeout(() => {
-    setBootMsg('Almost there — it’s very busy right now. Keep this screen open…');
-    try { ws.close(); } catch (e) {}   // → onclose → reconnect with backoff
-  }, 25000);
-
   ws.onmessage = ev => {
-    if (!_firstMsgLogged) {
-      _firstMsgLogged = true;
-      if (window._connTick) clearInterval(window._connTick);
-      const wsOpenMs   = _wsOpenAt ? Math.round(_wsOpenAt - tConnectStart) : -1;
-      const firstMsgMs = _wsOpenAt ? Math.round(performance.now() - _wsOpenAt) : -1;
-      const totalMs    = Math.round(performance.now() - tConnectStart);
-      _hud(true); // flash the completed boot HUD during the fade-out (no added delay)
-      console.log(`[conn] page=${_pageMs}ms tls=${_tlsMs}ms ws-open=${wsOpenMs}ms first-msg=${firstMsgMs}ms total=${totalMs}ms`);
-    }
     dismissBoot();
     const m = JSON.parse(ev.data);
     if (m.type === 'done') {
@@ -452,8 +330,6 @@ function connect() {
       document.getElementById('waiting-screen').classList.remove('show');
       setTimeout(() => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); }, Math.random() * 2000);
     } else if (m.type === 'waiting') {
-      document.getElementById('waitingTitle').textContent = 'Get ready!';
-      document.getElementById('waitingMsg').innerHTML = 'The game starts soon.<br>Keep this screen open.';
       document.getElementById('waiting-screen').classList.add('show');
       // retry every 3s in case the open signal was missed
       setTimeout(function retry() {
@@ -463,11 +339,8 @@ function connect() {
       }, 3000);
     } else if (m.type === 'config') {
       applyConfig(m);
-    } else if (m.type === 'rate-limited') {
-      showRateLimit(m.seconds);
     } else if (m.type === 'tile') {
       similarityRetries = 0; // fresh tile — reset retry counter
-      tileReceivedAt = Date.now();
       document.getElementById('waiting-screen').classList.remove('show');
       tileId = m.tileId; setBusy(false); clearDraw(); ghostClear(); updateTileUI();
 
@@ -475,49 +348,27 @@ function connect() {
       const hint = document.getElementById('hint');
       hint.textContent = m.fill === 0
         ? '⬛ This piece is fully black — scribble it all in!'
-        : ghostMode === 'immediate'
-          ? '✏️ Trace the image on the canvas below'
-          : '✏️ Copy this image on the canvas below';
+        : '✏️ Copy this image on the canvas below';
 
       const img = new Image();
       img.onload = () => {
         curRef = img; drawRef(img);
         document.getElementById('ghost').style.backgroundImage = `url(${img.src})`;
-        if (ghostMode === 'immediate') setGhostOpacity(0.40);
       };
       img.src = m.refUrl + '?t=' + Date.now();
     } else if (m.type === 'wait') {
-      // Server is briefly at capacity (render queue busy) — show the same centred,
-      // full-screen overlay as the pre-game wait so the "finding a tile" pause reads
-      // as intentional instead of a half-loaded GUI. Hidden again on the next 'tile'.
-      document.getElementById('waitingTitle').textContent = 'Almost there!';
-      document.getElementById('waitingMsg').innerHTML = 'Finding you a piece to draw…<br>Keep this screen open.';
-      document.getElementById('waiting-screen').classList.add('show');
+      toast('⏳ Looking for your next piece…');
       setTimeout(() => ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: 'next' })), 2000);
     } else if (m.type === 'accepted') {
-      // Submission accepted — if server signals a rate-limit delay, show countdown first.
-      // showRateLimit() sends 'next' automatically when countdown ends.
-      if (m.rateLimitSeconds > 0) {
-        showRateLimit(m.rateLimitSeconds);
-      } else {
-        setTimeout(() => {
-          if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
-        }, 900);
-      }
+      toast('✅ Sent — nice work!');
+      setTimeout(() => ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: 'next' })), 900);
     } else if (m.type === 'rejected') {
-      // Server rejected (rate limit bypass attempt) — just unlock so player can retry
+      toast(m.reason === 'stray' ? '✗ Extra marks in empty space!' : '✏️ Draw something first!');
       setBusy(false);
     }
   };
-  ws.onclose = () => {
-    if (connectWatchdog) { clearTimeout(connectWatchdog); connectWatchdog = null; }
-    // Backoff with jitter so a roomful of phones doesn't reconnect in lockstep
-    // and recreate the very connection storm we're trying to ride out.
-    const delay = Math.min(5000, 600 * Math.pow(1.6, Math.min(reconnectAttempts, 5))) + Math.random() * 1200;
-    reconnectAttempts++;
-    setTimeout(connect, delay);
-  };
-  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+  ws.onclose = () => setTimeout(connect, 2000);
+  ws.onerror  = () => ws.close();
 }
 
 function showDone() {
@@ -532,29 +383,22 @@ function loadDoneThumb() {
   const t   = '?t=' + Date.now();
   const img = document.getElementById('finalThumb');
   const lnk = document.getElementById('finalLink');
-  lnk.href  = '/api/export.png' + t;
+  lnk.href  = '/api/final-view.png' + t;
   img.onerror = () => {
     // Image still building on the server — retry every 3 s until it appears
     setTimeout(loadDoneThumb, 3000);
   };
-  img.src = '/api/export-thumb.png' + t;
+  img.src = '/api/final-view-thumb.png' + t;
 }
 
 function applyConfig(cfg) {
   if (cfg.inkColor)    { INK = cfg.inkColor;  document.documentElement.style.setProperty('--ink', INK); paintPaper(); }
   if (cfg.paperColor)  { PAPER = cfg.paperColor; document.documentElement.style.setProperty('--paper', PAPER); paintPaper(); }
-  // canvasColor intentionally ignored — player background is fixed black.
-  if (cfg.sendColor)     { SEND = cfg.sendColor; document.documentElement.style.setProperty('--send', SEND); }
-  if (cfg.btnClearColor) document.documentElement.style.setProperty('--btn-clear', cfg.btnClearColor);
-  if (cfg.btnNextColor)  document.documentElement.style.setProperty('--btn-next', cfg.btnNextColor);
+  if (cfg.canvasColor) document.documentElement.style.setProperty('--bg', cfg.canvasColor);
+  if (cfg.sendColor)   { SEND = cfg.sendColor; document.documentElement.style.setProperty('--send', SEND); }
   if (cfg.similarityThreshold !== undefined) simThreshold = cfg.similarityThreshold;
   if (cfg.maxStrayInk !== undefined) maxStrayInk = cfg.maxStrayInk;
   if (cfg.minCoverage !== undefined) minCoverage = cfg.minCoverage;
-  if (cfg.rateLimit   !== undefined) rateLimit   = cfg.rateLimit;
-  if (cfg.ghostMode   !== undefined) {
-    ghostMode = cfg.ghostMode;
-    document.getElementById('main').classList.toggle('centered', ghostMode === 'immediate');
-  }
 }
 
 // ── similarity check — multi-scale soft IoU ───────────────────────────────────
@@ -793,7 +637,6 @@ function updateTileUI() {
   const hasTile = !!tileId;
   document.getElementById('retrievingOverlay').classList.toggle('hidden', hasTile);
   document.getElementById('refCard').classList.toggle('dim', !hasTile);
-  document.getElementById('refCard').style.display = ghostMode === 'immediate' ? 'none' : '';
   document.getElementById('clearBtn').disabled = !hasTile;
   document.getElementById('buttons').style.opacity = hasTile ? '' : '0.4';
 }
@@ -812,8 +655,7 @@ document.getElementById('clearBtn').addEventListener('click', clearDraw);
 let nextCooldownTimer = null;
 document.getElementById('nextBtn').addEventListener('click', () => {
   if (!ws || ws.readyState !== 1) return;
-  if (nextCooldownTimer) return;
-  if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
+  if (nextCooldownTimer) { toast('⏱ Wait a moment before skipping'); return; }
   tileId = null; updateTileUI(); setBusy(true);
   ws.send(JSON.stringify({ type: 'next' }));
   const btn = document.getElementById('nextBtn');
@@ -839,30 +681,27 @@ document.getElementById('submitBtn').addEventListener('click', () => {
   setBusy(true);
   const result = getSimilarityScore();
   if (result.blank) { // nothing meaningful drawn — same intent as the old server blank reject
+    toast('✏️ Draw something first!');
     setBusy(false);
     return;
   }
   showResultFlash(result, () => {
     if (result.label === 'partial') {
-      ghostFail();
+      ghostFail();   // fade the tracing guide in so they can see what's missing
       setBusy(false);
       return;
     }
     if (!result.ok) {
       similarityRetries++;
       if (similarityRetries <= 1) {
-        // first failure: always free retry, server will rate-limit if they submit too fast
         clearDraw();
         ghostHide();
         ghostFail();
         setBusy(false);
       } else {
-        // second failure: move to next tile, apply rate limit if needed
-        if (!maybeShowRateLimit()) {
-          setTimeout(() => {
-            if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
-          }, 1800);
-        }
+        setTimeout(() => {
+          if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
+        }, 1800);
       }
       return;
     }
@@ -871,21 +710,10 @@ document.getElementById('submitBtn').addEventListener('click', () => {
 });
 
 document.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
-document.addEventListener('gesturestart', e => e.preventDefault(), { passive: false });
-document.addEventListener('gesturechange', e => e.preventDefault(), { passive: false });
-// prevent pinch zoom (2+ fingers)
-document.addEventListener('touchstart', e => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
-// prevent double-tap zoom
-let _lastTap = 0;
-document.addEventListener('touchend', e => {
-  const now = Date.now();
-  if (now - _lastTap < 300) e.preventDefault();
-  _lastTap = now;
-}, { passive: false });
 window.addEventListener('resize', () => requestAnimationFrame(setup));
 window.addEventListener('load',   () => requestAnimationFrame(() => {
   setup(); updateTileUI();
-  setTimeout(connect, Math.random() * 500); // small jitter to avoid lockstep reconnects
+  setTimeout(connect, Math.random() * 3000); // spread 10K simultaneous connects over 3s
 }));
 </script>
 </body>

@@ -107,7 +107,7 @@ systemctl enable nginx
 
 Create the config file:
 ```bash
-nano /etc/nginx/sites-available/crowd-canvas
+vi /etc/nginx/sites-available/crowd-canvas
 ```
 
 Paste this (replace `YOUR_DOMAIN` throughout):
@@ -116,7 +116,7 @@ Paste this (replace `YOUR_DOMAIN` throughout):
 limit_req_zone $binary_remote_addr zone=player:10m rate=50r/s;
 
 upstream app {
-    server 127.0.0.1:3100;
+    server 127.0.0.1:3000;
     keepalive 512;
 }
 
@@ -138,15 +138,11 @@ server {
     gzip_types text/html application/json text/css application/javascript;
     gzip_min_length 1024;
 
-    # Serve the player page straight from disk — it never touches Node, so a
-    # browser reload is instant even when the app is saturated under load.
-    # (player.html has no admin token, unlike admin/view, so it's safe to serve
-    # statically.) The short cache means a reload within 60s is a pure browser-
-    # cache hit with zero server round-trip.
     location = / {
-        root /opt/crowd-canvas/public;
-        try_files /player.html =404;
-        add_header Cache-Control "public, max-age=60";
+        limit_req zone=player burst=200 nodelay;
+        proxy_pass http://app;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
     }
 
     location /refs/ {
@@ -168,6 +164,8 @@ server {
     }
 
     location /dropveters-admin {
+        # Optional defense-in-depth for the admin page itself.
+        # The app still requires ADMIN_TOKEN for admin APIs and the admin websocket.
         auth_basic "Admin";
         auth_basic_user_file /etc/nginx/.htpasswd-canvas;
         proxy_pass http://app;
@@ -186,9 +184,21 @@ server {
 }
 ```
 
+Reverse-proxy these app paths:
+
+- public player page: `/`
+- public view page: `/dropveters-view`
+- optional admin page shell: `/dropveters-admin`
+- public player/view websocket: `/ws`
+- public static refs: `/refs/`
+- public live/final images: `/api/seed.png`, `/api/live-tile/*`, `/api/final-view.png`, `/api/final-view-thumb.png`
+- admin/control APIs: `/api/session*`, `/api/config`, `/api/state`, `/api/view/*`, `/api/export.png`, `/api/overlay.png`, `/api/tile/*`, `/api/submission/*`
+
+`ADMIN_TOKEN` protects the admin/control APIs and admin websocket in the app itself. nginx Basic Auth is optional defense-in-depth, not the primary control.
+
 ```bash
 # Edit nginx.conf to raise worker connections
-nano /etc/nginx/nginx.conf
+vi /etc/nginx/nginx.conf
 # Set these two lines:
 #   worker_processes auto;
 #   worker_connections 4096;   <- inside the events {} block
@@ -197,14 +207,6 @@ ln -s /etc/nginx/sites-available/crowd-canvas /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl reload nginx
 ```
-
-> **Keep `sites-enabled/crowd-canvas` a symlink, not a copy.** If it's a plain
-> file, edits to `sites-available/` won't take effect (we hit exactly this — the
-> enabled copy was stale and kept proxying `/` to Node). Verify with
-> `ls -l /etc/nginx/sites-enabled/` (you want `crowd-canvas -> ../sites-available/crowd-canvas`).
-> Note: changing a file into a symlink needs `systemctl restart nginx` — a plain
-> `reload` may not pick it up. Confirm the static page is live with:
-> `curl -sI https://YOUR_DOMAIN/ | grep -i cache` → should show `public, max-age=60`, **not** `no-store`.
 
 ---
 
@@ -234,23 +236,42 @@ Write the password down. You'll need it on event day.
 
 ---
 
-## 8. Generate the admin token
+## 8. Set ADMIN_TOKEN before public exposure
 
-All admin and view endpoints are protected by a secret token baked into the app at startup. Generate it once per deployment:
+`ADMIN_TOKEN` is required for any public deployment. When `NODE_ENV=production`, the app now refuses to start without it.
+
+Generate a long random token:
 
 ```bash
 openssl rand -hex 32
-# example output: a3f8c2d1e4b7a09f5c3e2d1b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9
 ```
 
-Open `ecosystem.config.cjs` and replace the placeholder:
+If you are running the app under **systemd**, put the token in `/etc/crowd-canvas.env`:
 
-```js
-ADMIN_TOKEN: 'paste-your-generated-token-here',
+```bash
+cat >/etc/crowd-canvas.env <<'EOF'
+ADMIN_TOKEN=PASTE_A_LONG_RANDOM_TOKEN_HERE
+EOF
+chmod 600 /etc/crowd-canvas.env
 ```
 
-> **Keep this value secret.** Anyone with the token can control the game.  
-> To rotate it: change the value and run `pm2 restart crowd-canvas --update-env`.
+Then reload and restart:
+
+```bash
+systemctl daemon-reload
+systemctl restart crowd-canvas
+```
+
+If you are running under **pm2**, export it before starting or restarting:
+
+```bash
+export ADMIN_TOKEN=PASTE_A_LONG_RANDOM_TOKEN_HERE
+export NODE_ENV=production
+pm2 restart crowd-canvas --update-env
+```
+
+Do not paste the token into screenshots, shared terminal recordings, or anything that logs full request URLs.
+Never send `ADMIN_TOKEN` in a query string. Use `Authorization: Bearer ...` for HTTP and the admin page's WebSocket subprotocol flow for the admin socket.
 
 ---
 
@@ -274,6 +295,8 @@ rsync -av --exclude node_modules --exclude data \
 # Back on the server
 cd /opt/crowd-canvas
 npm install --omit=dev
+export NODE_ENV=production
+export ADMIN_TOKEN=PASTE_A_LONG_RANDOM_TOKEN_HERE
 pm2 start ecosystem.config.cjs
 pm2 save
 pm2 startup   # copy-paste the command it prints
@@ -293,8 +316,11 @@ pm2 logs crowd-canvas --lines 20
 # Should return HTML
 curl -I https://YOUR_DOMAIN/
 
-# Should return JSON
-curl https://YOUR_DOMAIN/api/config
+# Should reject without the admin bearer token
+curl -i https://YOUR_DOMAIN/api/config
+
+# Should return JSON with the token
+curl -H "Authorization: Bearer $ADMIN_TOKEN" https://YOUR_DOMAIN/api/config
 
 # Open in browser and confirm the player page loads
 # https://YOUR_DOMAIN/
@@ -304,20 +330,6 @@ curl https://YOUR_DOMAIN/api/config
 
 ## 11. Load test (Day 4 of the 5-day plan)
 
-> **Read `HANDOFF_JAN.md` first** — it has the results and root-cause analysis from the 2026-06-06
-> campaign. Key takeaways: the server is solid (7,000 clients, 0 errors, submit latency ~11 ms);
-> nginx/TLS is **not** the bottleneck (~15 % CPU under load); and the connect-latency numbers from
-> our small generators were largely a *generator* artifact, not the server.
->
-> **Use real datacenter generators.** A single box caps near ~28k connections (ephemeral ports) and
-> a home-NAT'd laptop dies far earlier (router connection table) — both inflate the handshake/error
-> numbers and are not the server. For a true 20k test, use **2–3 Hetzner CX boxes** and fire them
-> together with `loadtest2.js --start-at`.
->
-> **`loadtest2.js`** is the preferred tester (full lifecycle: page + ref fetch + WS + submit, with
-> separate ws/http/ref error buckets and handshake + first-tile latency). `loadtest-matrix.js` is the
-> scripted smoke→storm→realistic sweep.
-
 You need two cheap extra servers as load generators.  
 On Hetzner: add two **CX22** instances (€0.01/hr each). Delete them after testing.
 
@@ -325,8 +337,8 @@ On each CX22:
 ```bash
 apt-get install -y nodejs npm
 ulimit -n 100000
-# copy the tester to this machine
-scp deploy@YOUR_SERVER_IP:/opt/crowd-canvas/loadtest2.js .
+# copy loadtest.js to this machine
+scp deploy@YOUR_SERVER_IP:/opt/crowd-canvas/loadtest.js .
 npm install ws sharp
 ```
 
@@ -370,14 +382,13 @@ watch -n 2 'ss -s | grep estab'
 ## 12. Event day checklist
 
 **2 hours before doors open:**
-- [ ] `pm2 restart crowd-canvas` — fresh process (clears accumulated test submissions from RAM)
-- [ ] Confirm `pm2 describe crowd-canvas` shows `max memory restart` = 16 G and `restarts` near 0
-- [ ] Open admin panel, upload the event image, slice it (≈6000 pieces for ~5k playable tiles — see `HANDOFF_JAN.md` §4)
+- [ ] `pm2 restart crowd-canvas` — fresh process
+- [ ] `echo "$ADMIN_TOKEN"` is not printed anywhere public, recorded, or screenshared
+- [ ] Open admin panel, upload the event image, slice it
 - [ ] Check the tile overlay looks right
-- [ ] Open view screen on the projector laptop — and **don't reload it mid-event** (10–30 s rebuild)
+- [ ] Open view screen on the projector laptop
 - [ ] Confirm QR code shows and scans to the right URL
 - [ ] Do one manual draw on your phone end-to-end
-- [ ] **Plan a staggered reveal** (release the QR in waves, not all 20k at once) — biggest lever for the opening storm
 
 **30 minutes before:**
 - [ ] `pm2 logs crowd-canvas` — confirm no errors
@@ -404,20 +415,16 @@ watch -n 2 'ss -s | grep estab'
 | Admin (you) | `https://YOUR_DOMAIN/dropveters-admin` |
 | View (projector) | `https://YOUR_DOMAIN/dropveters-view` |
 | Admin password | `admin` / ______________ |
+| ADMIN_TOKEN | __store out-of-band, never in screenshots__ |
 
 ---
 
 ## Re-deploy after code changes
 
-`/opt/crowd-canvas` is a git checkout tracking `origin/main`. Deploy via git — **not** ad-hoc rsync
-or manual edits (hand edits on the server once drifted from the repo and shipped a crash-looping
-build; see `HANDOFF_JAN.md` §1a).
-
 ```bash
-# develop → commit → push from your laptop, then on the server:
-ssh deploy@YOUR_SERVER_IP 'cd /opt/crowd-canvas && git pull && npm install --omit=dev && pm2 restart crowd-canvas --update-env'
-```
+rsync -av --exclude node_modules --exclude data \
+  /Users/jacobs/Downloads/crowd-canvas-main/ \
+  deploy@YOUR_SERVER_IP:/opt/crowd-canvas/
 
-> Use `--update-env` so pm2 picks up changes to `ecosystem.config.cjs` (including a rotated
-> `ADMIN_TOKEN`). If you changed `max_memory_restart`, a plain restart won't pick it up — do
-> `pm2 delete crowd-canvas && pm2 start ecosystem.config.cjs && pm2 save`.
+ssh deploy@YOUR_SERVER_IP 'export NODE_ENV=production ADMIN_TOKEN=PASTE_A_LONG_RANDOM_TOKEN_HERE && cd /opt/crowd-canvas && npm install --omit=dev && pm2 restart crowd-canvas --update-env'
+```

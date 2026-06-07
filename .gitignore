@@ -13,6 +13,7 @@ node_modules/
 # logs / process manager
 *.log
 logs/
+reports/
 .pm2/
 
 # env / secrets
@@ -25,3 +26,4 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+.indigo/

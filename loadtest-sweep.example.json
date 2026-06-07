@@ -1,0 +1,53 @@
+{
+  "baseConfig": {
+    "blendMode": "blend",
+    "blendGamma": 1.71,
+    "liveMinPixelVotes": 0,
+    "similarityThreshold": 0.35,
+    "maxStrayInk": 1.5,
+    "minCoverage": 0.6
+  },
+  "baseSession": {
+    "image": "data/JAN.png",
+    "pieces": 5000,
+    "redundancy": 5,
+    "includeSolidBlack": false
+  },
+  "scenarios": [
+    {
+      "name": "baseline-5k-r5",
+      "config": {},
+      "session": {}
+    },
+    {
+      "name": "more-pieces-8k-r5",
+      "config": {},
+      "session": {
+        "pieces": 8000
+      }
+    },
+    {
+      "name": "more-redundancy-5k-r7",
+      "config": {},
+      "session": {
+        "redundancy": 7
+      }
+    },
+    {
+      "name": "live-filter-1",
+      "config": {
+        "liveMinPixelVotes": 1
+      },
+      "session": {}
+    },
+    {
+      "name": "strict-validation",
+      "config": {
+        "similarityThreshold": 0.45,
+        "maxStrayInk": 1.0,
+        "minCoverage": 0.7
+      },
+      "session": {}
+    }
+  ]
+}

@@ -5,10 +5,9 @@
 // Difference from loadtest.js: this simulates what a REAL phone does, not just a
 // WebSocket. Each virtual player:
 //   1. GET /                       (the player page — nginx static/proxy)
-//   2. GET /api/config             (warm the API path)
-//   3. opens the WebSocket          (the TLS handshake storm lives here)
-//   4. on each tile: GET /refs/<id>.png  (ref image — nginx static or Node)
-//   5. "draws" for draw-min..draw-max seconds, then submits a realistic PNG
+//   2. opens the WebSocket          (the TLS handshake storm lives here)
+//   3. on each tile: GET /refs/<id>.png  (ref image — nginx static or Node)
+//   4. "draws" for draw-min..draw-max seconds, then submits a realistic PNG
 //
 // It reports errors in SEPARATE buckets so you can tell whether a problem is the
 // TLS handshake, the HTTP layer, the WebSocket, or the submission path — instead
@@ -31,7 +30,6 @@
 //   --draw-max S     max seconds drawing before submit         (default 40)
 //   --duration S     auto-stop after S seconds                 (default: until Ctrl-C)
 //   --insecure       accept self-signed / staging TLS cert
-//   --keepalive      reuse HTTP connections (default: off, = realistic cold scans)
 //
 // BEFORE RUNNING (on EACH generator machine):
 //   ulimit -n 100000
@@ -55,46 +53,32 @@
 
 import { WebSocket } from 'ws';
 import sharp from 'sharp';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 // ── args ────────────────────────────────────────────────────────────────────
-const argv = process.argv.slice(2);
-const base = argv.find(a => !a.startsWith('--'));
-function opt(name, def) {
+const __filename = fileURLToPath(import.meta.url);
+
+function opt(argv, name, def) {
   const i = argv.indexOf('--' + name);
   if (i < 0) return def;
   const v = argv[i + 1];
   return (v && !v.startsWith('--')) ? v : true;
 }
-if (!base) {
-  console.error('Usage: node loadtest2.js https://host [--clients N] [--rate R] [--start-at MS] [--mode full|ws|storm|http] ...');
-  process.exit(1);
-}
-// Accept either form: a base domain (https://host) OR the old-style ws URL
-// (wss://host/ws). Normalize to an https base + a wss /ws endpoint either way.
-let BASE = base.replace(/\/+$/, '');
-BASE = BASE.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:'); // ws→http, wss→https
-BASE = BASE.replace(/\/ws$/, '');                                // strip trailing /ws if given
-if (!/^https?:\/\//.test(BASE)) BASE = 'https://' + BASE;        // bare host → https
-const WS_URL   = BASE.replace(/^http/, 'ws') + '/ws?role=player';
-const CLIENTS  = +opt('clients', 5000);
-const RATE     = +opt('rate', 500);
-const START_AT = +opt('start-at', 0);
-const MODE     = String(opt('mode', 'full'));
-const DRAW_MIN = +opt('draw-min', 20);
-const DRAW_MAX = +opt('draw-max', 40);
-const DURATION = +opt('duration', 0);
-const INSECURE = !!opt('insecure', false);
-const KEEPALIVE = !!opt('keepalive', false);
 
-const wantHttp   = MODE === 'full' || MODE === 'http';
-const wantWs     = MODE === 'full' || MODE === 'ws' || MODE === 'storm';
-const wantSubmit = MODE === 'full' || MODE === 'ws';
+export function normalizeLoadtest2Target(raw) {
+  let base = String(raw).replace(/\/+$/, '');
+  base = base.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:');
+  base = base.replace(/\/ws$/, '');
+  if (!/^https?:\/\//.test(base)) base = 'https://' + base;
+  const wsUrl = base.replace(/^http/, 'ws') + '/ws?role=player';
+  return { base, wsUrl };
+}
 
 // NOTE: each WebSocket opens its OWN TLS connection (no pooling), so the WS path
 // is the real TLS-handshake-storm signal. HTTP fetches use Node's built-in fetch,
 // which pools connections; treat httpErr as a correctness/availability signal, and
 // read handshake latency (hs=) + connErr from the WS side for the storm picture.
-if (INSECURE) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 // ── realistic 256×256 submission PNG (matches real client output) ─────────────
 async function makeSubmitPng() {
@@ -121,17 +105,7 @@ async function makeSubmitPng() {
   return 'data:image/png;base64,' + png.toString('base64');
 }
 
-// ── metrics ───────────────────────────────────────────────────────────────────
-const m = {
-  httpOpened: 0, httpOk: 0, httpErr: 0,
-  refOk: 0, refErr: 0,
-  wsOpening: 0, wsLive: 0, wsClosed: 0, wsConnErr: 0,
-  submits: 0, accepted: 0, rejected: 0, waited: 0, done: 0, inflight: 0,
-};
 const tNow = () => Date.now();
-const handshakeLat = []; // ms from WS() to 'open'
-const firstTileLat = []; // ms from 'open' to first 'tile'
-const submitLat    = []; // ms from submit to accepted
 const rec = (arr, v) => { arr.push(v); if (arr.length > 8000) arr.shift(); };
 const pctl = (arr, p) => { if (!arr.length) return 0; const s = [...arr].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(p * s.length))]; };
 const avg  = arr => arr.length ? (arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(0) : 0;
@@ -145,69 +119,132 @@ async function httpGet(url, { binary = false } = {}) {
   } catch { return false; }
 }
 
-// ── one virtual player ──────────────────────────────────────────────────────
-let PNG;
-async function startClient() {
-  // HTTP phase: page + config (and in pure-http mode, also a ref later)
-  if (wantHttp) {
-    m.httpOpened++;
-    const okPage = await httpGet(BASE + '/');
-    const okCfg  = await httpGet(BASE + '/api/config');
-    if (okPage && okCfg) m.httpOk++; else m.httpErr++;
-  }
-  if (!wantWs) {
-    // pure http mode: also pull a representative static asset and stop
-    if (MODE === 'http') (await httpGet(BASE + '/api/seed.png', { binary: true })) ? m.refOk++ : m.refErr++;
-    return;
-  }
-
-  let ws;
-  const tOpen = tNow();
-  m.wsOpening++;
-  try { ws = new WebSocket(WS_URL, { rejectUnauthorized: !INSECURE }); }
-  catch { m.wsConnErr++; return; }
-
-  let gotFirstTile = false, sentAt = 0, openedAt = 0;
-
-  ws.on('open', () => { m.wsLive++; openedAt = tNow(); rec(handshakeLat, openedAt - tOpen); });
-
-  ws.on('message', async raw => {
-    let msg; try { msg = JSON.parse(raw); } catch { return; }
-
-    if (msg.type === 'tile') {
-      if (!gotFirstTile) { gotFirstTile = true; rec(firstTileLat, tNow() - openedAt); }
-      // realistic: fetch the ref image for this tile
-      if (wantHttp && msg.refUrl) (await httpGet(BASE + msg.refUrl, { binary: true })) ? m.refOk++ : m.refErr++;
-      if (!wantSubmit) return; // storm mode: hold the tile, never submit
-      setTimeout(() => {
-        if (ws.readyState !== 1) return;
-        sentAt = tNow(); m.inflight++; m.submits++;
-        ws.send(JSON.stringify({ type: 'submit', tileId: msg.tileId, png: PNG }));
-      }, rnd(DRAW_MIN, DRAW_MAX) * 1000);
-
-    } else if (msg.type === 'accepted') {
-      m.accepted++; m.inflight = Math.max(0, m.inflight - 1);
-      if (sentAt) rec(submitLat, tNow() - sentAt);
-      setTimeout(() => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); }, rnd(0.5, 3) * 1000);
-
-    } else if (msg.type === 'rejected') {
-      m.rejected++; m.inflight = Math.max(0, m.inflight - 1);
-      setTimeout(() => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); }, 800);
-
-    } else if (msg.type === 'wait' || msg.type === 'waiting') {
-      m.waited++;
-      setTimeout(() => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); }, rnd(3, 6) * 1000);
-
-    } else if (msg.type === 'done') {
-      m.done++;
-    }
-  });
-  ws.on('close', () => { m.wsLive = Math.max(0, m.wsLive - 1); m.wsClosed++; });
-  ws.on('error', () => { m.wsConnErr++; });
+function buildSummary(metrics, handshakeLat, firstTileLat, submitLat) {
+  return {
+    opened: metrics.wsOpening,
+    peakLive: metrics.wsPeakLive,
+    closed: metrics.wsClosed,
+    errors: metrics.wsConnErr,
+    wsConnErr: metrics.wsConnErr,
+    httpOpened: metrics.httpOpened,
+    httpOk: metrics.httpOk,
+    httpErr: metrics.httpErr,
+    refOk: metrics.refOk,
+    refErr: metrics.refErr,
+    sent: metrics.submits,
+    accepted: metrics.accepted,
+    rejected: metrics.rejected,
+    inflight: metrics.inflight,
+    waited: metrics.waited,
+    done: metrics.done,
+    handshakeAvg: Number(avg(handshakeLat)),
+    handshakeP95: pctl(handshakeLat, 0.95),
+    handshakeP99: pctl(handshakeLat, 0.99),
+    firstTileAvg: Number(avg(firstTileLat)),
+    firstTileP95: pctl(firstTileLat, 0.95),
+    firstTileP99: pctl(firstTileLat, 0.99),
+    submitAvg: Number(avg(submitLat)),
+    submitP95: pctl(submitLat, 0.95),
+    submitP99: pctl(submitLat, 0.99),
+    handshakeSamples: handshakeLat.length,
+    firstTileSamples: firstTileLat.length,
+    submitSamples: submitLat.length,
+  };
 }
 
-// ── ramp ───────────────────────────────────────────────────────────────────
-async function run() {
+async function runCli(argv = process.argv.slice(2)) {
+  const baseArg = argv.find(a => !a.startsWith('--'));
+  if (!baseArg) {
+    console.error('Usage: node loadtest2.js https://host [--clients N] [--rate R] [--start-at MS] [--mode full|ws|storm|http] ...');
+    process.exit(1);
+  }
+  const { base: BASE, wsUrl: WS_URL } = normalizeLoadtest2Target(baseArg);
+  const CLIENTS  = +opt(argv, 'clients', 5000);
+  const RATE     = +opt(argv, 'rate', 500);
+  const START_AT = +opt(argv, 'start-at', 0);
+  const MODE     = String(opt(argv, 'mode', 'full'));
+  const DRAW_MIN = +opt(argv, 'draw-min', 20);
+  const DRAW_MAX = +opt(argv, 'draw-max', 40);
+  const DURATION = +opt(argv, 'duration', 0);
+  const INSECURE = !!opt(argv, 'insecure', false);
+  if (INSECURE) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
+  const wantHttp   = MODE === 'full' || MODE === 'http';
+  const wantWs     = MODE === 'full' || MODE === 'ws' || MODE === 'storm';
+  const wantSubmit = MODE === 'full' || MODE === 'ws';
+  const metrics = {
+    httpOpened: 0, httpOk: 0, httpErr: 0,
+    refOk: 0, refErr: 0,
+    wsOpening: 0, wsLive: 0, wsPeakLive: 0, wsClosed: 0, wsConnErr: 0,
+    submits: 0, accepted: 0, rejected: 0, waited: 0, done: 0, inflight: 0,
+  };
+  const handshakeLat = [];
+  const firstTileLat = [];
+  const submitLat = [];
+  let PNG;
+
+  async function startClient() {
+  // HTTP phase: page + config (and in pure-http mode, also a ref later)
+    if (wantHttp) {
+      metrics.httpOpened++;
+      const okPage = await httpGet(BASE + '/');
+      if (okPage) metrics.httpOk++; else metrics.httpErr++;
+    }
+    if (!wantWs) {
+      if (MODE === 'http') (await httpGet(BASE + '/api/seed.png', { binary: true })) ? metrics.refOk++ : metrics.refErr++;
+      return;
+    }
+
+    let ws;
+    const tOpen = tNow();
+    metrics.wsOpening++;
+    try { ws = new WebSocket(WS_URL, { rejectUnauthorized: !INSECURE }); }
+    catch { metrics.wsConnErr++; return; }
+
+    let gotFirstTile = false, sentAt = 0, openedAt = 0;
+
+    ws.on('open', () => {
+      metrics.wsLive++;
+      metrics.wsPeakLive = Math.max(metrics.wsPeakLive, metrics.wsLive);
+      openedAt = tNow();
+      rec(handshakeLat, openedAt - tOpen);
+    });
+
+    ws.on('message', async raw => {
+      let msg; try { msg = JSON.parse(raw); } catch { return; }
+
+      if (msg.type === 'tile') {
+        if (!gotFirstTile) { gotFirstTile = true; rec(firstTileLat, tNow() - openedAt); }
+        if (wantHttp && msg.refUrl) (await httpGet(BASE + msg.refUrl, { binary: true })) ? metrics.refOk++ : metrics.refErr++;
+        if (!wantSubmit) return;
+        setTimeout(() => {
+          if (ws.readyState !== 1) return;
+          sentAt = tNow(); metrics.inflight++; metrics.submits++;
+          ws.send(JSON.stringify({ type: 'submit', tileId: msg.tileId, png: PNG }));
+        }, rnd(DRAW_MIN, DRAW_MAX) * 1000);
+
+      } else if (msg.type === 'accepted') {
+        metrics.accepted++; metrics.inflight = Math.max(0, metrics.inflight - 1);
+        if (sentAt) rec(submitLat, tNow() - sentAt);
+        setTimeout(() => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); }, rnd(0.5, 3) * 1000);
+
+      } else if (msg.type === 'rejected') {
+        metrics.rejected++; metrics.inflight = Math.max(0, metrics.inflight - 1);
+        setTimeout(() => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); }, 800);
+
+      } else if (msg.type === 'wait' || msg.type === 'waiting') {
+        metrics.waited++;
+        setTimeout(() => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); }, rnd(3, 6) * 1000);
+
+      } else if (msg.type === 'done') {
+        metrics.done++;
+      }
+    });
+    ws.on('close', () => { metrics.wsLive = Math.max(0, metrics.wsLive - 1); metrics.wsClosed++; });
+    ws.on('error', () => { metrics.wsConnErr++; });
+  }
+
+  // ── ramp ───────────────────────────────────────────────────────────────────
   console.log('Generating realistic 256×256 submission PNG…');
   PNG = await makeSubmitPng();
   console.log(`PNG size: ${(PNG.length / 1024).toFixed(1)} KB`);
@@ -217,7 +254,7 @@ async function run() {
     if (wait > 0) { console.log(`Synchronized start: waiting ${(wait / 1000).toFixed(1)}s until ${new Date(START_AT).toISOString()}…`); await new Promise(r => setTimeout(r, wait)); }
   }
   console.log(`\nLoad test v2 → ${BASE}`);
-  console.log(`mode=${MODE}  clients=${CLIENTS}  rate=${RATE}/s  draw=${DRAW_MIN}-${DRAW_MAX}s  http=${wantHttp}  submit=${wantSubmit}  keepalive=${KEEPALIVE}\n`);
+  console.log(`mode=${MODE}  clients=${CLIENTS}  rate=${RATE}/s  draw=${DRAW_MIN}-${DRAW_MAX}s  http=${wantHttp}  submit=${wantSubmit}\n`);
 
   const t0 = tNow();
   let launched = 0;
@@ -231,21 +268,25 @@ async function run() {
   const report = setInterval(() => {
     const secs = Math.max(1, Math.round((tNow() - t0) / 1000));
     console.log(
-      `t=${secs}s live=${m.wsLive}/${launched} sub/s=${(m.submits / secs).toFixed(1)} ok=${m.accepted} infl=${m.inflight} ` +
-      `wait=${m.waited} done=${m.done} | ERR ws=${m.wsConnErr} http=${m.httpErr} ref=${m.refErr} | ` +
-      `hs=${avg(handshakeLat)}/${pctl(handshakeLat, .95)}ms tile=${avg(firstTileLat)}ms sub=${avg(submitLat)}/${pctl(submitLat, .99)}ms`
+      `t=${secs}s live=${metrics.wsLive}/${launched} sub/s=${(metrics.submits / secs).toFixed(1)} ok=${metrics.accepted} inflight=${metrics.inflight} ` +
+      `done=${metrics.done} wait=${metrics.waited} wsErr=${metrics.wsConnErr} httpErr=${metrics.httpErr} refErr=${metrics.refErr} ` +
+      `hs avg=${avg(handshakeLat)}ms p95=${pctl(handshakeLat, .95)}ms p99=${pctl(handshakeLat, .99)}ms ` +
+      `tile avg=${avg(firstTileLat)}ms p95=${pctl(firstTileLat, .95)}ms p99=${pctl(firstTileLat, .99)}ms ` +
+      `submit avg=${avg(submitLat)}ms p95=${pctl(submitLat, .95)}ms p99=${pctl(submitLat, .99)}ms`
     );
   }, 2000);
 
   const shutdown = () => {
     clearInterval(ramp); clearInterval(report);
+    const summary = buildSummary(metrics, handshakeLat, firstTileLat, submitLat);
     console.log('\n─── final summary ─────────────────────────────────────────');
-    console.log(`http      opened=${m.httpOpened} ok=${m.httpOk} err=${m.httpErr}  refImg ok=${m.refOk} err=${m.refErr}`);
-    console.log(`websocket opened=${m.wsOpening} peak-live≈${m.wsLive} closed=${m.wsClosed} connErr=${m.wsConnErr}`);
-    console.log(`submits   sent=${m.submits} accepted=${m.accepted} rejected=${m.rejected} waited=${m.waited} done=${m.done}`);
-    console.log(`handshake avg=${avg(handshakeLat)}ms p95=${pctl(handshakeLat, .95)}ms p99=${pctl(handshakeLat, .99)}ms  (TLS+WS upgrade)`);
-    console.log(`firsttile avg=${avg(firstTileLat)}ms p95=${pctl(firstTileLat, .95)}ms  (open→first tile)`);
-    console.log(`submitLat avg=${avg(submitLat)}ms p95=${pctl(submitLat, .95)}ms p99=${pctl(submitLat, .99)}ms`);
+    console.log(`http      opened=${summary.httpOpened} ok=${summary.httpOk} err=${summary.httpErr}  refImg ok=${summary.refOk} err=${summary.refErr}`);
+    console.log(`websocket opened=${summary.opened} peak-live≈${summary.peakLive} closed=${summary.closed} connErr=${summary.wsConnErr}`);
+    console.log(`submits   sent=${summary.sent} accepted=${summary.accepted} rejected=${summary.rejected} waited=${summary.waited} done=${summary.done}`);
+    console.log(`handshake avg=${summary.handshakeAvg}ms p95=${summary.handshakeP95}ms p99=${summary.handshakeP99}ms  (TLS+WS upgrade)`);
+    console.log(`firsttile avg=${summary.firstTileAvg}ms p95=${summary.firstTileP95}ms p99=${summary.firstTileP99}ms  (open→first tile)`);
+    console.log(`submitLat avg=${summary.submitAvg}ms p95=${summary.submitP95}ms p99=${summary.submitP99}ms`);
+    console.log(`SUMMARY_JSON ${JSON.stringify({ tester: 'loadtest2', summary })}`);
     console.log('───────────────────────────────────────────────────────────');
     console.log('Interpreting: high connErr/handshake = TLS storm bottleneck (nginx CPU / somaxconn).');
     console.log('              high httpErr/refErr    = nginx static or Node HTTP path.');
@@ -253,7 +294,10 @@ async function run() {
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
   if (DURATION) setTimeout(shutdown, DURATION * 1000);
 }
 
-run().catch(e => { console.error(e); process.exit(1); });
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  runCli().catch(e => { console.error(e); process.exit(1); });
+}

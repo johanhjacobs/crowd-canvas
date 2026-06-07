@@ -5,7 +5,9 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node scripts/smoke-admin-auth.js && node scripts/smoke-production-token.js && node scripts/smoke-loadtest2-normalization.js",
+    "loadtest:matrix": "node loadtest-matrix.js"
   },
   "engines": {
     "node": ">=20"
@@ -13,9 +15,8 @@
   "dependencies": {
     "better-sqlite3": "^11.8.1",
     "express": "^4.21.2",
-    "multer": "^1.4.5-lts.1",
-    "shark": "^2.3.0",
+    "multer": "^2.1.1",
     "sharp": "^0.33.5",
-    "ws": "^8.21.0"
+    "ws": "^8.18.0"
   }
 }

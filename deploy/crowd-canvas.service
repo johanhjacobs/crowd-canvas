@@ -11,6 +11,7 @@ WorkingDirectory=/opt/crowd-canvas
 Environment=NODE_ENV=production
 Environment=PORT=3000
 Environment=HOST=127.0.0.1
+EnvironmentFile=-/etc/crowd-canvas.env
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=3

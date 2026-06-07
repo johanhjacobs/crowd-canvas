@@ -95,56 +95,22 @@ const canvas = document.getElementById('c');
 const ctx    = canvas.getContext('2d');
 const sidebar = document.getElementById('sidebar');
 
-let bgFill = '#000000', textFill = '#ffffff', tileFill = '#000000';
-let inkFill = '#000000', paperFill = '#ffffff';
+let bgFill = '#000000', textFill = '#ffffff';
 
-function hexToRgb(hex) {
-  return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
-}
-
-// Remap greyscale tile pixels: 0 (dark) → inkFill, 255 (bright) → paperFill.
-// Transparent pixels (empty-tile areas in the seed) are left as-is.
-// Returns the original img unchanged when ink/paper are the defaults.
-function colorize(img, w, h) {
-  if (inkFill === '#000000' && paperFill === '#ffffff') return img;
-  const c = document.createElement('canvas');
-  c.width = w; c.height = h;
-  const cx = c.getContext('2d');
-  cx.drawImage(img, 0, 0, w, h);
-  const id = cx.getImageData(0, 0, w, h);
-  const d = id.data;
-  const [ir, ig, ib] = hexToRgb(inkFill);
-  const [pr, pg, pb] = hexToRgb(paperFill);
-  for (let i = 0; i < d.length; i += 4) {
-    if (d[i+3] === 0) continue;          // transparent = empty tile area in seed
-    const t = d[i] / 255;                // 0 = darkest ink, 1 = brightest paper
-    d[i]   = (ir + (pr - ir) * t + 0.5) | 0;
-    d[i+1] = (ig + (pg - ig) * t + 0.5) | 0;
-    d[i+2] = (ib + (pb - ib) * t + 0.5) | 0;
-  }
-  cx.putImageData(id, 0, 0);
-  return c;
-}
-
-function applyViewColors(bg, text, tile, ink, paper, { reseed = true } = {}) {
-  bgFill = bg; textFill = text; tileFill = tile || bg;
-  inkFill = ink || '#000000'; paperFill = paper || '#ffffff';
+function applyViewColors(bg, text, { reseed = true } = {}) {
+  bgFill = bg; textFill = text;
   document.body.style.background = bg;
   document.getElementById('canvas-wrap').style.background = bg;
   document.getElementById('veil').style.background = bg;
-  canvas.style.background = tileFill;
+  canvas.style.background = bg;
   sidebar.style.color = text;
   sidebar.style.borderLeftColor = text + '1f';
   document.getElementById('canvas-border').style.borderColor = text + '38';
   document.getElementById('canvas-border').style.boxShadow = `0 0 40px ${text}0f`;
-  ctx.fillStyle = tileFill;
+  ctx.fillStyle = bg;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   if (lastSeedImg) {
-    ctx.drawImage(colorize(lastSeedImg, canvas.width, canvas.height), 0, 0, canvas.width, canvas.height);
-    // repaint tile-update overlays (drawn after the seed was loaded)
-    for (const [, e] of tiles) {
-      if (e.img) ctx.drawImage(colorize(e.img, e.sz, e.sz), e.x, e.y, e.sz, e.sz);
-    }
+    ctx.drawImage(lastSeedImg, 0, 0, canvas.width, canvas.height); // instant restore
   } else if (reseed && canvas.width > 0) {
     seedFromServer();
   }
@@ -159,10 +125,11 @@ function seedFromServer() {
   const img = new Image();
   img.onload = () => {
     lastSeedImg = img;
-    ctx.drawImage(colorize(img, canvas.width, canvas.height), 0, 0, canvas.width, canvas.height);
+    // Draw over existing content — never clear first.
+    // The screen stays stable until the new seed is fully loaded.
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
   };
-  const tok = window._AT ? '&token=' + window._AT : '';
-  img.src = '/api/seed.png?t=' + Date.now() + tok;
+  img.src = '/api/seed.png?t=' + Date.now();
 }
 
 function resize() {
@@ -181,12 +148,13 @@ function resize() {
   // so the screen is never blank during a window resize.
   canvas.width  = imgW;
   canvas.height = imgH;
-  ctx.fillStyle = tileFill;
+  ctx.fillStyle = bgFill;
   ctx.fillRect(0, 0, imgW, imgH);
   if (lastSeedImg) {
-    ctx.drawImage(colorize(lastSeedImg, imgW, imgH), 0, 0, imgW, imgH);
+    ctx.drawImage(lastSeedImg, 0, 0, imgW, imgH); // instant — no network
+    // Repaint any tile-updates received after the seed was loaded
     for (const [, entry] of tiles) {
-      if (entry.img) ctx.drawImage(colorize(entry.img, entry.sz, entry.sz), entry.x, entry.y, entry.sz, entry.sz);
+      if (entry.img) ctx.drawImage(entry.img, entry.x, entry.y, entry.sz, entry.sz);
     }
   } else if (imgW > 0) {
     seedFromServer();
@@ -199,8 +167,11 @@ function paintTile(id, x, y, sz, version) {
   const img   = new Image();
   img.onload = () => {
     if (!tiles.has(id)) return;
-    ctx.drawImage(colorize(img, sz, sz), x, y, sz, sz);
-    entry.img = img; // store original for resize / re-colorize
+    ctx.drawImage(img, x, y, sz, sz);
+    // Keep a reference only for resize repainting.
+    // Once the seed cache catches up (view-sync clears tiles),
+    // this Image is released and the memory is freed.
+    entry.img = img;
   };
   img.src = `/api/live-tile/${encodeURIComponent(id)}.png?v=${version}`;
 }
@@ -232,27 +203,26 @@ let ws;
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?role=view`);
-  ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', token: window._AT || '' }));
   ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
     if (m.type === 'init' || m.type === 'reset') {
       tiles.clear();
       lastSeedImg = null; // new session — don't restore old mosaic
-      applyViewColors(m.bgColor || '#000000', m.textColor || '#ffffff', m.tileColor || '#e0e0e0', m.inkColor || '#000000', m.paperColor || '#ffffff', { reseed: false });
+      applyViewColors(m.bgColor || '#000000', m.textColor || '#ffffff', { reseed: false });
       if (m.sidebarWidth) sidebar.style.width = m.sidebarWidth + '%';
-      if (!m.active) { ctx.fillStyle=tileFill; ctx.fillRect(0,0,imgW,imgH); return; }
+      if (!m.active) { ctx.fillStyle=bgFill; ctx.fillRect(0,0,imgW,imgH); return; }
       imgW = m.imgW || m.size || 1024;
       imgH = m.imgH || m.size || 1024;
       canvas.width  = imgW;
       canvas.height = imgH;
-      ctx.fillStyle = tileFill; ctx.fillRect(0, 0, imgW, imgH);
+      ctx.fillStyle = bgFill; ctx.fillRect(0, 0, imgW, imgH);
       resize();
       seedFromServer();
     }
     else if (m.type === 'tile-update') { paintTile(m.tileId, m.x, m.y, m.sz, m.version || 0); }
     else if (m.type === 'tile-cleared') {
       tiles.delete(m.tileId);
-      ctx.fillStyle = tileFill; ctx.fillRect(m.x, m.y, m.sz, m.sz);
+      ctx.fillStyle = bgFill; ctx.fillRect(m.x, m.y, m.sz, m.sz);
     }
     else if (m.type === 'view-mode')   { document.getElementById('veil').classList.toggle('on', m.mode === 'paused'); }
     else if (m.type === 'view-sync')   {
@@ -263,7 +233,7 @@ function connect() {
       seedFromServer();
     }
     else if (m.type === 'view-sidebar') { setSidebar(m.on); }
-    else if (m.type === 'view-colors') { applyViewColors(m.bg, m.text, m.tile, m.ink, m.paper); }
+    else if (m.type === 'view-colors') { applyViewColors(m.bg, m.text); }
     else if (m.type === 'view-sidebar-width') { sidebar.style.width = m.width + '%'; resize(); }
     else if (m.type === 'stats') {
       document.getElementById('stat-players').textContent = m.players ?? '—';

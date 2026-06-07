@@ -100,21 +100,23 @@ console.log(`PNG size: ${(PNG.length / 1024).toFixed(1)} KB  (real submissions w
 const target = url + (url.includes('?') ? '&' : '?') + 'role=player';
 let opened = 0, live = 0, closed = 0, errors = 0;
 let submits = 0, accepted = 0, rejected = 0, done = 0, waiting = 0, inflight = 0;
-const lat = [];
-const recordLat = ms => { lat.push(ms); if (lat.length > 4000) lat.shift(); };
+const assignLat = [];
+const submitLat = [];
+const recordLat = (arr, ms) => { arr.push(ms); if (arr.length > 4000) arr.shift(); };
 const pctl = (arr, p) => {
   if (!arr.length) return 0;
   const s = [...arr].sort((a, b) => a - b);
   return s[Math.min(s.length - 1, Math.floor(p * s.length))];
 };
 const rnd = (a, b) => a + Math.random() * (b - a);
+const avgMs = arr => (arr.reduce((a, b) => a + b, 0) / (arr.length || 1)).toFixed(0);
 
 function startClient() {
   let ws;
   try { ws = new WebSocket(target, { rejectUnauthorized: !INSECURE }); }
   catch { errors++; return; }
   opened++;
-  let tilesDone = 0, sentAt = 0;
+  let tilesDone = 0, sentAt = 0, awaitingTileSince = Date.now();
   const finish = () => { if (!HOLD) ws.close(); };
 
   ws.on('open', () => { live++; });
@@ -122,6 +124,10 @@ function startClient() {
     let m; try { m = JSON.parse(raw); } catch { return; }
 
     if (m.type === 'tile') {
+      if (awaitingTileSince) {
+        recordLat(assignLat, Date.now() - awaitingTileSince);
+        awaitingTileSince = 0;
+      }
       // Simulate drawing time: uniform random between draw-min and draw-max seconds
       setTimeout(() => {
         if (ws.readyState !== 1) return;
@@ -131,19 +137,25 @@ function startClient() {
 
     } else if (m.type === 'accepted') {
       accepted++; inflight = Math.max(0, inflight - 1);
-      if (sentAt) recordLat(Date.now() - sentAt);
+      if (sentAt) recordLat(submitLat, Date.now() - sentAt);
       tilesDone++;
       if (TILES === 0 || tilesDone < TILES) {
         // Short pause between tiles (realistic: player reads the next fragment)
         setTimeout(() => {
-          if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
+          if (ws.readyState === 1) {
+            awaitingTileSince = Date.now();
+            ws.send(JSON.stringify({ type: 'next' }));
+          }
         }, rnd(0.5, 3) * 1000);
       } else finish();
 
     } else if (m.type === 'rejected') {
       rejected++; inflight = Math.max(0, inflight - 1);
       setTimeout(() => {
-        if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
+        if (ws.readyState === 1) {
+          awaitingTileSince = Date.now();
+          ws.send(JSON.stringify({ type: 'next' }));
+        }
       }, 500);
 
     } else if (m.type === 'done') {
@@ -152,7 +164,10 @@ function startClient() {
     } else if (m.type === 'wait' || m.type === 'waiting') {
       waiting++;
       setTimeout(() => {
-        if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
+        if (ws.readyState === 1) {
+          awaitingTileSince = Date.now();
+          ws.send(JSON.stringify({ type: 'next' }));
+        }
       }, rnd(3, 6) * 1000);
     }
   });
@@ -170,7 +185,6 @@ const ramp = setInterval(() => {
 }, 1000);
 
 // ── live stats ────────────────────────────────────────────────────────────────
-const avg = () => (lat.reduce((a, b) => a + b, 0) / (lat.length || 1)).toFixed(0);
 const t0  = Date.now();
 
 const report = setInterval(() => {
@@ -178,21 +192,58 @@ const report = setInterval(() => {
   const subsPerSec = (submits / Math.max(1, +secs)).toFixed(1);
   console.log(
     `t=${secs}s  live=${live}/${launched}  sub/s=${subsPerSec}  ok=${accepted} inflight=${inflight}` +
-    `  done=${done} wait=${waiting} err=${errors}  lat avg=${avg()}ms p95=${pctl(lat, 0.95)}ms p99=${pctl(lat, 0.99)}ms`
+    `  done=${done} wait=${waiting} err=${errors}` +
+    `  assign avg=${avgMs(assignLat)}ms p95=${pctl(assignLat, 0.95)}ms` +
+    `  submit avg=${avgMs(submitLat)}ms p95=${pctl(submitLat, 0.95)}ms p99=${pctl(submitLat, 0.99)}ms`
   );
 }, 2000);
 
 // ── shutdown ──────────────────────────────────────────────────────────────────
 function shutdown() {
   clearInterval(ramp); clearInterval(report);
+  const summary = {
+    opened,
+    peakLive: live,
+    closed,
+    errors,
+    wsConnErr: errors,
+    httpOpened: 0,
+    httpOk: 0,
+    httpErr: 0,
+    refOk: 0,
+    refErr: 0,
+    sent: submits,
+    accepted,
+    rejected,
+    inflight,
+    waited: waiting,
+    done,
+    assignAvg: Number(avgMs(assignLat)),
+    assignP95: pctl(assignLat, 0.95),
+    assignP99: pctl(assignLat, 0.99),
+    assignSamples: assignLat.length,
+    submitAvg: Number(avgMs(submitLat)),
+    submitP95: pctl(submitLat, 0.95),
+    submitP99: pctl(submitLat, 0.99),
+    submitSamples: submitLat.length,
+    handshakeAvg: 0,
+    handshakeP95: 0,
+    handshakeP99: 0,
+    firstTileAvg: 0,
+    firstTileP95: 0,
+    firstTileP99: 0,
+  };
   console.log('\n─── final summary ───────────────────────────────────────────');
   console.log(`connections  opened=${opened}  peak-live≈${live}  closed=${closed}  errors=${errors}`);
   console.log(`submissions  sent=${submits}  accepted=${accepted}  rejected=${rejected}  inflight=${inflight}`);
-  console.log(`latency      avg=${avg()}ms  p95=${pctl(lat, 0.95)}ms  p99=${pctl(lat, 0.99)}ms  (${lat.length} samples)`);
+  console.log(`assignment   avg=${avgMs(assignLat)}ms  p95=${pctl(assignLat, 0.95)}ms  p99=${pctl(assignLat, 0.99)}ms  (${assignLat.length} samples)`);
+  console.log(`submit       avg=${avgMs(submitLat)}ms  p95=${pctl(submitLat, 0.95)}ms  p99=${pctl(submitLat, 0.99)}ms  (${submitLat.length} samples)`);
+  console.log(`SUMMARY_JSON ${JSON.stringify({ tester: 'loadtest', summary })}`);
   console.log('─────────────────────────────────────────────────────────────');
   process.exit(0);
 }
 process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 if (DURATION) setTimeout(shutdown, DURATION * 1000);
 
 console.log(`\nLoad test → ${target}`);
