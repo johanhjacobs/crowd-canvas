@@ -541,7 +541,8 @@ function seedMosaic() {
   };
   // Seed the review canvas from the live seed (cheap, always fresh) — NOT export.png,
   // which is built only at game end. Live tile-updates keep painting on top.
-  img.src = '/api/dropveters-seed.png?t=' + Date.now();
+  // _SEED is injected by the server (obfuscated, slug from .env).
+  img.src = window._SEED + '?t=' + Date.now();
 }
 
 function showReview(tiles) {

@@ -38,6 +38,9 @@ module.exports = {
       // Admin token — loaded from the untracked .env (or the shell env).
       // It protects all admin endpoints and the admin WebSocket.
       ADMIN_TOKEN: env.ADMIN_TOKEN || process.env.ADMIN_TOKEN || '',
+      // Obfuscation slug for the admin / view / seed URLs (e.g. 'dropveters').
+      // Kept in .env so the real slug isn't pinned in source.
+      OBFUSCATION_SLUG: env.OBFUSCATION_SLUG || process.env.OBFUSCATION_SLUG || 'dropveters',
       // Sharp uses libuv's thread pool for all native async ops.
       // Default is 4 threads — far too low for 600 concurrent Sharp decodes/second.
       // On an AX102 (16 cores / 32 threads) 16 is a safe, well-benchmarked value.

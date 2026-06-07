@@ -151,23 +151,28 @@ const HOST = process.env.HOST || '127.0.0.1';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 if (!ADMIN_TOKEN) console.warn('[security] ADMIN_TOKEN not set — admin API is open to everyone');
 
-// Random view path — regenerated on every server restart.
-// Only the admin panel shows it, so it stays secret without any password prompt.
-const VIEW_PATH = '/dropveters-view';
+// ── obfuscation slug ──────────────────────────────────────────────────────────
+// The non-public URLs (admin / view / live seed) use an obscure slug instead of
+// obvious names. Set OBFUSCATION_SLUG in .env so the real slug isn't pinned in
+// source; falls back to 'dropveters' for back-compat. Sanitised to a URL/HTML-safe
+// charset because it lands in route paths and an injected <script>.
+const SLUG = (process.env.OBFUSCATION_SLUG || 'dropveters').replace(/[^a-z0-9-]/gi, '') || 'dropveters';
+const ADMIN_PATH = `/${SLUG}-admin`;
+const VIEW_PATH  = `/${SLUG}-view`;
+const SEED_PATH  = `/api/${SLUG}-seed.png`;
 
-// Pre-inject token into trusted HTML pages at startup so the browser never
-// has to know the token directly — it's baked in server-side.
-function buildHtml(filePath) {
+// Pre-inject runtime globals into trusted HTML pages at startup. _SEED (the
+// obfuscated seed URL) goes into BOTH admin and view. The admin token (_AT) goes
+// into the admin page ONLY — never the public view page, or the big-screen URL
+// would leak admin access.
+function buildHtml(filePath, { withToken = false } = {}) {
   let html = fs.readFileSync(filePath, 'utf8');
-  if (ADMIN_TOKEN) {
-    html = html.replace('</head>', `<script>window._AT='${ADMIN_TOKEN}';</script></head>`);
-  }
-  return html;
+  const globals = [`window._SEED='${SEED_PATH}'`];
+  if (withToken && ADMIN_TOKEN) globals.push(`window._AT='${ADMIN_TOKEN}'`);
+  return html.replace('</head>', `<script>${globals.join(';')};</script></head>`);
 }
-const adminHtml = buildHtml(path.join(__dirname, 'public', 'admin.html'));
-// View is public + read-only — never embed the admin token in it (it would leak
-// to anyone who opens the big-screen URL). Serve the raw file.
-const viewHtml  = fs.readFileSync(path.join(__dirname, 'public', 'view.html'), 'utf8');
+const adminHtml = buildHtml(path.join(__dirname, 'public', 'admin.html'), { withToken: true });
+const viewHtml  = buildHtml(path.join(__dirname, 'public', 'view.html'));
 const DATA = path.join(__dirname, 'data');
 const REFS = path.join(DATA, 'refs');
 const FINAL_VIEW = path.join(DATA, 'final-view.png');
@@ -933,7 +938,7 @@ const noCache = (_, res, next) => { res.set('Cache-Control', 'no-store'); next()
 
 // ── auth middleware ───────────────────────────────────────────────────────────
 // Public GET endpoints (players need these — no token required):
-const PUBLIC_API = new Set(['/config', '/export.png', '/export-thumb.png', '/dropveters-seed.png']);
+const PUBLIC_API = new Set(['/config', '/export.png', '/export-thumb.png', `/${SLUG}-seed.png`]);
 app.use('/api', (req, res, next) => {
   if (!ADMIN_TOKEN) return next(); // no token set → dev mode, allow all
   if (req.method === 'GET' && PUBLIC_API.has(req.path)) return next();
@@ -944,7 +949,7 @@ app.use('/api', (req, res, next) => {
 });
 
 app.get('/',                 noCache, (_, res) => res.sendFile(path.join(__dirname, 'public', 'player.html')));
-app.get('/dropveters-admin', noCache, (_, res) => res.type('html').send(adminHtml));
+app.get(ADMIN_PATH, noCache, (_, res) => res.type('html').send(adminHtml));
 app.get(VIEW_PATH,           noCache, (_, res) => res.type('html').send(viewHtml));
 
 // 150 MB covers an uncompressed 8K B&W PNG; typical line-art files are far smaller.
@@ -1126,7 +1131,7 @@ function scheduleSeedRebuild(delay = 2000) {
 // Obfuscated name: the live seed must stay reachable during play (the big screen
 // loads it), so it can't be gated to game-end like export — instead its URL is
 // non-obvious and only appears in the (semi-hidden) view + admin pages.
-app.get('/api/dropveters-seed.png', async (_, res) => {
+app.get(SEED_PATH, async (_, res) => {
   try {
     if (!state) return res.status(404).end();
     if (!seedPngCache) await buildSeedPng();   // first-time: wait for build

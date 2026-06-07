@@ -161,7 +161,7 @@ function seedFromServer() {
     lastSeedImg = img;
     ctx.drawImage(colorize(img, canvas.width, canvas.height), 0, 0, canvas.width, canvas.height);
   };
-  img.src = '/api/dropveters-seed.png?t=' + Date.now();
+  img.src = window._SEED + '?t=' + Date.now();
 }
 
 function resize() {
