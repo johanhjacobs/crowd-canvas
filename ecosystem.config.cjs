@@ -1,6 +1,31 @@
 // pm2 process config for Crowd Canvas.
 // IMPORTANT: single instance, fork mode. The app keeps all game state in memory
 // in one process — cluster mode or multiple instances would desync the mosaic.
+
+// Secrets live OUTSIDE git in a .env file (gitignored). On the server create
+//   /opt/crowd-canvas/.env  with:  ADMIN_TOKEN=<run: openssl rand -hex 32>
+// Never put the token directly in this file — it is tracked by git.
+const fs = require('fs');
+const path = require('path');
+function loadEnv(file) {
+  const out = {};
+  try {
+    for (const line of fs.readFileSync(path.join(__dirname, file), 'utf8').split('\n')) {
+      if (!line.trim() || line.trim().startsWith('#')) continue;
+      const m = line.match(/^\s*([\w.-]+)\s*=\s*(.*?)\s*$/);
+      if (!m) continue;
+      let v = m[2];
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+      out[m[1]] = v;
+    }
+  } catch { /* no .env — ADMIN_TOKEN stays empty */ }
+  return out;
+}
+const env = loadEnv('.env');
+if (!env.ADMIN_TOKEN && !process.env.ADMIN_TOKEN) {
+  console.warn('[ecosystem] no ADMIN_TOKEN in .env — admin API will be OPEN!');
+}
+
 module.exports = {
   apps: [{
     name: 'crowd-canvas',
@@ -10,9 +35,9 @@ module.exports = {
     env: {
       PORT: 3100,
       HOST: '127.0.0.1',
-      // Generate once with: openssl rand -hex 32
-      // Keep this secret — it protects all admin and view endpoints.
-      ADMIN_TOKEN: '92b437d9d8f65e6f494a5eae64bfa2e9cf9cc6e02114b6fb1b2d92ec2395d3fc',
+      // Admin token — loaded from the untracked .env (or the shell env).
+      // It protects all admin endpoints and the admin WebSocket.
+      ADMIN_TOKEN: env.ADMIN_TOKEN || process.env.ADMIN_TOKEN || '',
       // Sharp uses libuv's thread pool for all native async ops.
       // Default is 4 threads — far too low for 600 concurrent Sharp decodes/second.
       // On an AX102 (16 cores / 32 threads) 16 is a safe, well-benchmarked value.

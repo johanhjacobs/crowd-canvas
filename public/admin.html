@@ -539,7 +539,9 @@ function seedMosaic() {
       if ((t.subs || 0) === 0) mc.fillRect(t.x, t.y, t.sz, t.sz);
     }
   };
-  img.src = '/api/export.png?t=' + Date.now();
+  // Seed the review canvas from the live seed (cheap, always fresh) — NOT export.png,
+  // which is built only at game end. Live tile-updates keep painting on top.
+  img.src = '/api/dropveters-seed.png?t=' + Date.now();
 }
 
 function showReview(tiles) {

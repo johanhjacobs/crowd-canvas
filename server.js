@@ -165,7 +165,9 @@ function buildHtml(filePath) {
   return html;
 }
 const adminHtml = buildHtml(path.join(__dirname, 'public', 'admin.html'));
-const viewHtml  = buildHtml(path.join(__dirname, 'public', 'view.html'));
+// View is public + read-only — never embed the admin token in it (it would leak
+// to anyone who opens the big-screen URL). Serve the raw file.
+const viewHtml  = fs.readFileSync(path.join(__dirname, 'public', 'view.html'), 'utf8');
 const DATA = path.join(__dirname, 'data');
 const REFS = path.join(DATA, 'refs');
 const FINAL_VIEW = path.join(DATA, 'final-view.png');
@@ -931,7 +933,7 @@ const noCache = (_, res, next) => { res.set('Cache-Control', 'no-store'); next()
 
 // ── auth middleware ───────────────────────────────────────────────────────────
 // Public GET endpoints (players need these — no token required):
-const PUBLIC_API = new Set(['/config', '/export.png', '/export-thumb.png', '/seed.png']);
+const PUBLIC_API = new Set(['/config', '/export.png', '/export-thumb.png', '/dropveters-seed.png']);
 app.use('/api', (req, res, next) => {
   if (!ADMIN_TOKEN) return next(); // no token set → dev mode, allow all
   if (req.method === 'GET' && PUBLIC_API.has(req.path)) return next();
@@ -1121,7 +1123,10 @@ function scheduleSeedRebuild(delay = 2000) {
   seedRebuildTimer = setTimeout(() => { seedRebuildTimer = null; buildSeedPng().catch(console.error); }, delay);
 }
 
-app.get('/api/seed.png', async (_, res) => {
+// Obfuscated name: the live seed must stay reachable during play (the big screen
+// loads it), so it can't be gated to game-end like export — instead its URL is
+// non-obvious and only appears in the (semi-hidden) view + admin pages.
+app.get('/api/dropveters-seed.png', async (_, res) => {
   try {
     if (!state) return res.status(404).end();
     if (!seedPngCache) await buildSeedPng();   // first-time: wait for build
@@ -1310,7 +1315,7 @@ async function buildExportPng() {
 
 app.get('/api/export.png', async (_, res) => {
   try {
-    if (!state) return res.status(404).end();
+    if (!state || !state.done) return res.status(404).end(); // built only at game end
     const buf = await ensureExportPng();
     if (!buf) return res.status(500).end();
     res.type('png').send(buf);
@@ -1319,7 +1324,7 @@ app.get('/api/export.png', async (_, res) => {
 
 app.get('/api/export-thumb.png', async (_, res) => {
   try {
-    if (!state) return res.status(404).end();
+    if (!state || !state.done) return res.status(404).end(); // built only at game end
     const buf = await ensureExportThumb();
     if (!buf) return res.status(500).end();
     res.set('Cache-Control', 'no-store').type('png').send(buf);
@@ -1643,10 +1648,20 @@ wss.on('connection', (ws, req) => {
   const role = new URL(req.url, 'http://x').searchParams.get('role');
   const send = o => { if (ws.readyState === 1) ws.send(JSON.stringify(o)); };
 
-  if (role === 'admin' || role === 'view') {
+  // The view (big screen) is public and read-only: setupViewWS registers no
+  // message handler, so a view client can only receive broadcasts. It therefore
+  // needs no admin token — which is what lets the view page stay public without
+  // ever embedding the token in its HTML.
+  if (role === 'view') {
+    setupViewWS(ws, send);
+    return;
+  }
+
+  // Admin can mutate game state, so it stays token-gated.
+  if (role === 'admin') {
     if (!ADMIN_TOKEN) {
       // No token configured (dev mode) — connect immediately
-      role === 'admin' ? setupAdminWS(ws, send) : setupViewWS(ws, send);
+      setupAdminWS(ws, send);
       return;
     }
     // Require token as first message; close if wrong or nothing arrives within 5 s
@@ -1655,7 +1670,7 @@ wss.on('connection', (ws, req) => {
       clearTimeout(t);
       let m; try { m = JSON.parse(raw); } catch { ws.terminate(); return; }
       if (m.type !== 'auth' || m.token !== ADMIN_TOKEN) { ws.terminate(); return; }
-      role === 'admin' ? setupAdminWS(ws, send) : setupViewWS(ws, send);
+      setupAdminWS(ws, send);
     });
     return;
   }
