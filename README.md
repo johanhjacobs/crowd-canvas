@@ -64,6 +64,15 @@ RENDER_WORKERS=4
 RENDER_WORKERS_MAX=6
 ```
 
+`RENDER_WORKERS` pins the requested worker count. `RENDER_WORKERS_MAX` is the safety cap that
+limits both automatic sizing and explicit overrides. The server also enforces an internal absolute
+cap of `32` workers. A good production starting point is still:
+
+```bash
+RENDER_WORKERS=4
+RENDER_WORKERS_MAX=6
+```
+
 ## How an event runs
 
 1. Open the admin page, upload a high-contrast **black & white** image — bold shapes/line-art slice
@@ -110,7 +119,8 @@ ssh deploy@VPS 'export NODE_ENV=production ADMIN_TOKEN=PASTE_A_LONG_RANDOM_TOKEN
 
 > **Render worker sizing is CPU-dependent by default.** The server uses `os.availableParallelism()`
 > first, falls back to `os.cpus().length`, and leaves CPU for the main HTTP/WebSocket loop. Use
-> `RENDER_WORKERS=4` to pin an explicit count or `RENDER_WORKERS_MAX=6` to cap automatic sizing.
+> `RENDER_WORKERS=4` to pin a requested count and `RENDER_WORKERS_MAX=6` as the safety cap for both
+> automatic sizing and explicit overrides. The internal absolute cap remains `32`.
 
 For large events (10k–20k) you also need to raise the file-descriptor limit, tune nginx worker
 connections and WebSocket timeouts, and pick a dedicated-CPU instance. See

@@ -63,7 +63,9 @@ submit), 300 s:
 
 Current repo note: render worker count is no longer treated as a fixed constant. The server now
 sizes workers from detected CPU count, leaves headroom for the main event loop, and supports
-`RENDER_WORKERS=4` / `RENDER_WORKERS_MAX=6` overrides for production tuning.
+`RENDER_WORKERS=4` / `RENDER_WORKERS_MAX=6` for production tuning. `RENDER_WORKERS` pins the
+requested count, `RENDER_WORKERS_MAX` acts as the safety cap for both automatic sizing and explicit
+overrides, and there is also an internal absolute cap of `32` workers.
 
 **Connect latency** (`hs=`) measured avg ~10 s / p99 ~20 s, but this is **largely a generator
 artifact**: our generators were a single 4 GB Hetzner box and an iMac behind home NAT, both of

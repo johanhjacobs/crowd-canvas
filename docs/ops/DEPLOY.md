@@ -257,6 +257,15 @@ EOF
 chmod 600 /etc/crowd-canvas.env
 ```
 
+`RENDER_WORKERS` pins the requested worker count. `RENDER_WORKERS_MAX` is the safety cap for both
+automatic sizing and explicit overrides. The app also enforces an internal absolute cap of `32`
+workers, even if a higher value is configured. Recommended production start:
+
+```bash
+RENDER_WORKERS=4
+RENDER_WORKERS_MAX=6
+```
+
 Then reload and restart:
 
 ```bash

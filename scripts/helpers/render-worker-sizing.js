@@ -47,11 +47,13 @@ export function decideRenderWorkers(env = process.env, cpuCount = detectCpuCount
     warnings.push(`invalid RENDER_WORKERS="${env.RENDER_WORKERS}" - falling back to automatic sizing`);
     workers = autoRenderWorkersForCpu(cpuCount, maxCap);
   } else if (rawOverride !== null) {
-    workers = Math.max(1, Math.min(HARD_RENDER_WORKER_LIMIT, rawOverride));
+    workers = Math.max(1, Math.min(maxCap, HARD_RENDER_WORKER_LIMIT, rawOverride));
     overrideUsed = true;
   } else {
     workers = autoRenderWorkersForCpu(cpuCount, maxCap);
   }
+
+  workers = Math.max(1, Math.min(maxCap, HARD_RENDER_WORKER_LIMIT, workers));
 
   return {
     detectedCpuCount: cpuCount,
