@@ -8,8 +8,8 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { randomUUID, timingSafeEqual } from 'crypto';
-import os from 'os';
 import { Worker } from 'worker_threads';
+import { decideRenderWorkers, logRenderWorkerDecision } from './scripts/render-worker-sizing.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -23,7 +23,9 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const DATA = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, 'data');
 const REFS = path.join(DATA, 'refs');
 const FINAL_VIEW = path.join(DATA, 'final-view.png');
-const RENDER_WORKERS = Math.max(1, Math.min(4, (os.availableParallelism?.() || 2) - 1));
+const renderWorkerDecision = decideRenderWorkers(process.env);
+logRenderWorkerDecision(renderWorkerDecision);
+const RENDER_WORKERS = renderWorkerDecision.selectedWorkers;
 const SUBMISSION_DB_FLUSH_MS = 80;
 const HOT_QUEUE_SOFT_LIMIT = 400;
 const ADMIN_WS_PROTOCOL = 'crowd-canvas-admin';

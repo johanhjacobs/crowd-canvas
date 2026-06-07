@@ -12,6 +12,11 @@ module.exports = {
       PORT: 3000,
       HOST: '127.0.0.1',
       ADMIN_TOKEN: process.env.ADMIN_TOKEN,
+      // Optional render-worker sizing overrides.
+      // Example fixed size: RENDER_WORKERS=4
+      // Example automatic cap: RENDER_WORKERS_MAX=6
+      RENDER_WORKERS: process.env.RENDER_WORKERS,
+      RENDER_WORKERS_MAX: process.env.RENDER_WORKERS_MAX || 6,
       // Sharp uses libuv's thread pool for all native async ops.
       // Default is 4 threads — far too low for 600 concurrent Sharp decodes/second.
       // On an AX102 (16 cores / 32 threads) 16 is a safe, well-benchmarked value.

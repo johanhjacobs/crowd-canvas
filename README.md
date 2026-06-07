@@ -5,6 +5,13 @@ server slices it into tiles with a quadtree. Each guest gets a tile on their pho
 thick brush, and submits — and the mosaic fills in live on the big screen. Built for and tested at
 10,000+ simultaneous players.
 
+## Docs
+
+- [docs/README.md](docs/README.md) - documentation index
+- [docs/ops/DEPLOY.md](docs/ops/DEPLOY.md) - production deployment runbook
+- [docs/ops/HANDOFF_JAN.md](docs/ops/HANDOFF_JAN.md) - operational notes from the hardening and load-test campaign
+- [docs/history/CHANGES_FROM_OLD.md](docs/history/CHANGES_FROM_OLD.md) - historical diff notes versus the older codebase
+
 ## Stack
 
 - **Runtime:** Node.js ≥ 20 (ESM)
@@ -49,6 +56,13 @@ Then open:
 
 `PORT` and `HOST` are read from the environment (defaults `3000` / `127.0.0.1`).
 Production examples in this repo all use `127.0.0.1:3000` behind nginx.
+Render workers are sized automatically from CPU count, leaving headroom for the main event loop.
+Optional production overrides:
+
+```bash
+RENDER_WORKERS=4
+RENDER_WORKERS_MAX=6
+```
 
 ## How an event runs
 
@@ -94,9 +108,14 @@ ssh deploy@VPS 'export NODE_ENV=production ADMIN_TOKEN=PASTE_A_LONG_RANDOM_TOKEN
 > app now expects `Authorization: Bearer <ADMIN_TOKEN>` on admin/control APIs and the same token on
 > the admin websocket. nginx Basic Auth is optional defense-in-depth, not the only protection.
 
+> **Render worker sizing is CPU-dependent by default.** The server uses `os.availableParallelism()`
+> first, falls back to `os.cpus().length`, and leaves CPU for the main HTTP/WebSocket loop. Use
+> `RENDER_WORKERS=4` to pin an explicit count or `RENDER_WORKERS_MAX=6` to cap automatic sizing.
+
 For large events (10k–20k) you also need to raise the file-descriptor limit, tune nginx worker
-connections and WebSocket timeouts, and pick a dedicated-CPU instance. See `DEPLOY.md` for the
-full step-by-step runbook including sysctl tuning, TLS setup, and a load-test plan.
+connections and WebSocket timeouts, and pick a dedicated-CPU instance. See
+[`docs/ops/DEPLOY.md`](docs/ops/DEPLOY.md) for the full step-by-step runbook including sysctl
+tuning, TLS setup, and a load-test plan.
 
 ## Data
 

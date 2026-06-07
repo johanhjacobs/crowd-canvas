@@ -251,6 +251,8 @@ If you are running the app under **systemd**, put the token in `/etc/crowd-canva
 ```bash
 cat >/etc/crowd-canvas.env <<'EOF'
 ADMIN_TOKEN=PASTE_A_LONG_RANDOM_TOKEN_HERE
+RENDER_WORKERS=4
+RENDER_WORKERS_MAX=6
 EOF
 chmod 600 /etc/crowd-canvas.env
 ```
@@ -267,6 +269,8 @@ If you are running under **pm2**, export it before starting or restarting:
 ```bash
 export ADMIN_TOKEN=PASTE_A_LONG_RANDOM_TOKEN_HERE
 export NODE_ENV=production
+export RENDER_WORKERS=4
+export RENDER_WORKERS_MAX=6
 pm2 restart crowd-canvas --update-env
 ```
 
@@ -297,6 +301,8 @@ cd /opt/crowd-canvas
 npm install --omit=dev
 export NODE_ENV=production
 export ADMIN_TOKEN=PASTE_A_LONG_RANDOM_TOKEN_HERE
+export RENDER_WORKERS=4
+export RENDER_WORKERS_MAX=6
 pm2 start ecosystem.config.cjs
 pm2 save
 pm2 startup   # copy-paste the command it prints
@@ -307,6 +313,9 @@ Check it's running:
 pm2 list
 pm2 logs crowd-canvas --lines 20
 ```
+
+At startup the app logs the render-worker sizing decision, including detected CPU count, selected
+workers, whether an env override was used, and the effective max cap.
 
 ---
 

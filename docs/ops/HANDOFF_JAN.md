@@ -61,6 +61,10 @@ submit), 300 s:
 | **nginx CPU** | **~11–15 %** → *not* the bottleneck |
 | node CPU | spread across 4 render workers (~50 % each) + main (~40 %) + libuv pool |
 
+Current repo note: render worker count is no longer treated as a fixed constant. The server now
+sizes workers from detected CPU count, leaves headroom for the main event loop, and supports
+`RENDER_WORKERS=4` / `RENDER_WORKERS_MAX=6` overrides for production tuning.
+
 **Connect latency** (`hs=`) measured avg ~10 s / p99 ~20 s, but this is **largely a generator
 artifact**: our generators were a single 4 GB Hetzner box and an iMac behind home NAT, both of
 which cap out (NAT connection table / single-thread client-side TLS) and inflate the metric, which
@@ -156,4 +160,4 @@ Always re-slice a **test** image first (fills the mosaic with junk + clears the 
   not revert `location = /` to `proxy_pass`. `player.html` has no token so it's safe to serve raw.
   (`/ws`, `/api/*`, `/dropveters-admin`, `/dropveters-view` still proxy to Node.) Also: keep
   `sites-enabled/crowd-canvas` a **symlink** to `sites-available/` — a stale plain-file copy there
-  silently kept the old config; see DEPLOY.md §5.
+  silently kept the old config; see [DEPLOY.md](DEPLOY.md) §5.
