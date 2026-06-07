@@ -127,7 +127,12 @@ server {
 }
 
 server {
-    listen 443 ssl http2;
+    # backlog=65535: raise the accept queue from nginx's default 511 so a connection
+    # storm (the QR reveal) doesn't overflow it. An overflow drops SYNs → TCP retransmits
+    # with exponential backoff → ~20s "Connecting" for unlucky clients. Needs
+    # net.core.somaxconn + tcp_max_syn_backlog raised too (see step 3) AND a full
+    # `systemctl restart nginx` to take effect (reload reuses the old listen socket).
+    listen 443 ssl http2 backlog=65535;
     server_name YOUR_DOMAIN;
 
     ssl_certificate     /etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem;
@@ -234,23 +239,36 @@ Write the password down. You'll need it on event day.
 
 ---
 
-## 8. Generate the admin token
+## 8. Set the admin token (in `.env`, never in git)
 
-All admin and view endpoints are protected by a secret token baked into the app at startup. Generate it once per deployment:
+The **admin** HTTP endpoints and the admin WebSocket are gated by a secret token. The token is
+read from an **untracked `.env` file** — *not* from `ecosystem.config.cjs`, which is tracked by git
+(a token committed there leaks to anyone with repo access). See `.env.example` for the template.
+
+> **The view and player pages are public.** The big-screen view is read-only and carries **no**
+> token (it never embeds it, so the public URL can't leak admin access). Only `/dropveters-admin`
+> and the admin `/api/*` calls require the token — and `/dropveters-admin` is *also* behind nginx
+> Basic auth (§7), so it's two factors.
+
+Generate a token and write it to `/opt/crowd-canvas/.env` on the server:
 
 ```bash
 openssl rand -hex 32
-# example output: a3f8c2d1e4b7a09f5c3e2d1b8a7f6e5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b0a9
+# then, on the server:
+echo "ADMIN_TOKEN=PASTE_THE_GENERATED_TOKEN" > /opt/crowd-canvas/.env
+chmod 600 /opt/crowd-canvas/.env
 ```
 
-Open `ecosystem.config.cjs` and replace the placeholder:
+`ecosystem.config.cjs` reads `.env` at pm2 start and injects `ADMIN_TOKEN` into the process.
+Confirm it loaded after starting/restarting:
 
-```js
-ADMIN_TOKEN: 'paste-your-generated-token-here',
+```bash
+pm2 env 0 | grep ADMIN_TOKEN     # must print your token, NOT empty
 ```
 
-> **Keep this value secret.** Anyone with the token can control the game.  
-> To rotate it: change the value and run `pm2 restart crowd-canvas --update-env`.
+> **Keep this value secret and out of git.** `.env` is gitignored.  
+> Empty/missing token ⇒ the admin API is **open to everyone** (the app logs a warning).  
+> Rotate it: edit `.env` → `pm2 restart ecosystem.config.cjs --update-env` → `pm2 save`.
 
 ---
 
@@ -290,8 +308,11 @@ pm2 logs crowd-canvas --lines 20
 ## 10. Verify everything works
 
 ```bash
-# Should return HTML
+# Should return HTML — and Cache-Control: public, max-age=60 (served by nginx, NOT no-store from Node)
 curl -I https://YOUR_DOMAIN/
+
+# Accept queue must be 65535 (Send-Q column), not 511 — confirms backlog= took effect after restart
+ss -lnt 'sport = :443'
 
 # Should return JSON
 curl https://YOUR_DOMAIN/api/config
@@ -418,6 +439,13 @@ build; see `HANDOFF_JAN.md` §1a).
 ssh deploy@YOUR_SERVER_IP 'cd /opt/crowd-canvas && git pull && npm install --omit=dev && pm2 restart crowd-canvas --update-env'
 ```
 
-> Use `--update-env` so pm2 picks up changes to `ecosystem.config.cjs` (including a rotated
-> `ADMIN_TOKEN`). If you changed `max_memory_restart`, a plain restart won't pick it up — do
+> Use `--update-env` so pm2 re-reads `ecosystem.config.cjs` (and the `.env` it loads — including a
+> rotated `ADMIN_TOKEN`). If you changed `max_memory_restart`, a plain restart won't pick it up — do
 > `pm2 delete crowd-canvas && pm2 start ecosystem.config.cjs && pm2 save`.
+
+> **A restart is mandatory after any HTML change.** `admin.html` and `view.html` are read into memory
+> **once at startup** (`buildHtml`/`fs.readFileSync` in `server.js`) — copying a new file without a
+> `pm2 restart` changes nothing. And if you ever deploy by hand instead of `git pull`, **HTML files
+> belong in `public/`**: `scp public/view.html deploy@host:/opt/crowd-canvas/` drops it in the *root*
+> and the app keeps serving the old `public/view.html`. Fastest check that your HTML actually shipped:
+> `curl -s https://YOUR_DOMAIN/dropveters-view | grep -o 'dropveters-seed.png'` (should print the name).

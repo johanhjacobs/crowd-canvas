@@ -20,8 +20,10 @@ public/
   admin.html         host control panel
   view.html          big-screen live mosaic
 package.json
-ecosystem.config.cjs pm2 process config (single instance — see below)
-loadtest.js          load-test script (simulates phones)
+ecosystem.config.cjs pm2 process config (single instance — reads ADMIN_TOKEN from .env)
+.env.example         template for the untracked .env (holds ADMIN_TOKEN)
+loadtest2.js         recommended load tester (full lifecycle per virtual player)
+loadtest-matrix.jan.js / loadtest.jan.js   Jan's staged runner + breakpoint discovery
 data/                runtime data (git-ignored, auto-created)
   crowd.db           SQLite database
   original.png       last uploaded image (grayscale, preserved for re-slicing)
@@ -70,6 +72,18 @@ When run via pm2 (`ecosystem.config.cjs`) the port is `3100`.
 Validation (similarity, coverage, stray ink, blank) runs on the player's phone; the server stores
 what it's sent. The live pixel filter and per-tile review/clear are the server-side moderation layer.
 
+### Security model
+
+- **Admin** (`/dropveters-admin`, all mutating `/api/*`, admin WebSocket) requires a secret
+  `ADMIN_TOKEN`, read from an untracked **`.env`** file (never `ecosystem.config.cjs`, which is in
+  git — see `.env.example`). In production the admin page is *also* behind nginx Basic auth.
+- **View** (`/dropveters-view`, big screen) and **player** (`/`) are **public**. The view is
+  read-only and embeds **no** token, so the public big-screen URL can't leak admin access.
+- **Export PNGs** (`/api/export.png`, `-thumb`) are built **only at game end** — they can't be
+  triggered (and CPU-hammered) during play.
+- The live seed image is served under an obfuscated path (`/api/dropveters-seed.png`), referenced
+  only by the view and admin pages.
+
 **Restart** wipes all submissions and reshuffles the deck without re-uploading the image.  
 **Auto-fill & finish** gradually fills any undrawn tiles with their reference images over a
 configurable duration (1–60 s) for a smooth animated reveal, then closes the game.
@@ -101,18 +115,24 @@ automatically on first run; deleting it resets all sessions.
 > See **`HANDOFF_JAN.md`** for the 2026-06-06 load-test results, root-cause analysis (a crash loop
 > and a memory restart, both fixed), and the remaining client-side TODOs.
 
-Three testers ship with the project:
+Testers that ship with the project:
 
 - **`loadtest2.js`** (recommended) — full lifecycle per virtual player (page + ref fetch + WS +
-  submit), separate ws/http/ref error buckets, handshake + first-tile latency, and `--start-at` for
-  a synchronized multi-machine QR-reveal storm.
-- **`loadtest-matrix.js`** — scripted smoke → storm → realistic sweep with a PASS/WARN/FAIL summary.
-- **`loadtest.js`** — the original simple WS-only tester.
+  submit), `--mode full|ws|storm|http`, separate ws/http/ref error buckets, handshake + first-tile
+  latency, and `--start-at` for a synchronized multi-machine QR-reveal storm.
+- **`loadtest-matrix.jan.js`** — Jan's staged runner: `--profile matrix|smoke|event|breakpoint`,
+  where **`breakpoint`** automatically discovers the capacity break-point. Spawns `loadtest.jan.js`
+  per stage; run from the repo root.
+- **`loadtest.jan.js`** / **`loadtest.js`** — single-stage WS+submit workers.
 
 ```bash
 ulimit -n 100000                                   # on the test machine
-node loadtest2.js wss://draw.mmsparty.nl/ws --clients 7000 --rate 500 --duration 300
+node loadtest2.js wss://asml.mmsparty.nl/ws --mode storm --clients 7000 --rate 500 --duration 300
 ```
+
+> See **`HANDOFF_JAN_2026-06-07.md`** for the latest results: the 16-core/32 GB server holds 6 k
+> drawing players at ~20 % CPU with **2 ms** submit latency — one 4 GB generator box, not the
+> server, is the limiter.
 
 > A single generator box caps near ~28k connections (ephemeral ports) and a home-NAT'd machine far
 > earlier — both inflate the numbers and are not the server. For a true 20k test use 2–3 datacenter

@@ -43,6 +43,22 @@ upgrade is required.
 - **Fix:** `sharp.cache(false)` (`server.js:18`) + `max_memory_restart: '16G'` in
   `ecosystem.config.cjs`. Clearing the DB (re-slice) before each test keeps tests representative.
 
+### 1c. Every player page-load fetched `/api/export-thumb.png` (~16s Node build) — CRITICAL
+- `public/player.html` had a hardcoded `<img id="finalThumb" src="/api/export-thumb.png">` (the
+  done-screen thumbnail). A real browser fetches that on **every** page load. `/api/export-thumb.png`
+  is a Node-built composite of all tiles, and its cache is invalidated on every submission, so during
+  active play it **rebuilds every time → ~16s under load** (confirmed in Chrome DevTools: page=14ms,
+  ws=ok, but export-thumb=16.45s).
+- Impact at 20k: every joining phone triggers a ~16s Node build, competing with WS handling on Node's
+  single thread → joins get slower the more people join (self-amplifying). This was the real cause of
+  "Connecting takes ~20s but in-game is smooth" — and it would very likely have wrecked the QR reveal.
+- **Fix:** removed the static `src`/`href`; `loadDoneThumb()` already sets both, so the thumbnail now
+  loads **only on the done screen**, not on join. (At game end, 20k fetches hit the cached, build-locked
+  thumbnail served from RAM — a manageable end-of-game peak, not during the join storm.)
+- **Why it hid so long:** the WS load-test scripts don't render HTML, so they never fetched the
+  `<img>` a real browser does. **Lesson: always test with a real browser (DevTools Network tab) under
+  load**, not just the WS script — synthetic tests miss browser-driven resource loads.
+
 ---
 
 ## 2. Load-test results (clean run, after fixes)
@@ -154,3 +170,9 @@ Always re-slice a **test** image first (fills the mosaic with junk + clears the 
   (`/ws`, `/api/*`, `/dropveters-admin`, `/dropveters-view` still proxy to Node.) Also: keep
   `sites-enabled/crowd-canvas` a **symlink** to `sites-available/` — a stale plain-file copy there
   silently kept the old config; see DEPLOY.md §5.
+- **nginx `listen 443 ssl ... backlog=65535`** — raised from the default 511 so a connection storm
+  (the QR reveal) doesn't overflow the accept queue. An overflow drops SYNs → TCP retransmits →
+  ~20s "Connecting" for unlucky clients (we saw this on a real iPhone under the heaviest test). Needs
+  `somaxconn`/`tcp_max_syn_backlog` raised too (they are) AND a full `systemctl restart nginx`
+  (reload reuses the old socket). Verify with `ss -lnt 'sport = :443'` → Send-Q should be 65535.
+  Certbot may rewrite the `listen` line on renewal and drop `backlog=` — re-check after any renewal.
