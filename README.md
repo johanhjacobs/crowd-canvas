@@ -47,6 +47,9 @@ Then open:
 | Admin (host)     | `/dropveters-admin`          |
 | View (big screen)| `/dropveters-view`           |
 
+The `dropveters` segment of the admin/view paths is the **obfuscation slug** — set
+`OBFUSCATION_SLUG` in `.env` to change it (default `dropveters`; see *Security model*).
+
 `PORT` and `HOST` are read from the environment (defaults `3000` / `127.0.0.1`).
 When run via pm2 (`ecosystem.config.cjs`) the port is `3100`.
 
@@ -81,8 +84,12 @@ what it's sent. The live pixel filter and per-tile review/clear are the server-s
   read-only and embeds **no** token, so the public big-screen URL can't leak admin access.
 - **Export PNGs** (`/api/export.png`, `-thumb`) are built **only at game end** — they can't be
   triggered (and CPU-hammered) during play.
-- The live seed image is served under an obfuscated path (`/api/dropveters-seed.png`), referenced
-  only by the view and admin pages.
+- The **obfuscation slug** in the admin/view/seed paths (`/<slug>-admin`, `/<slug>-view`,
+  `/api/<slug>-seed.png`) is read from **`OBFUSCATION_SLUG`** in `.env` (default `dropveters`), so
+  the real slug isn't pinned in source. The server injects the seed URL into the trusted pages at
+  startup. Changing the slug also requires updating the nginx `location /<slug>-admin` Basic-auth
+  block. This is security-by-obscurity — only the admin token + nginx Basic auth are real access
+  control.
 
 **Restart** wipes all submissions and reshuffles the deck without re-uploading the image.  
 **Auto-fill & finish** gradually fills any undrawn tiles with their reference images over a
@@ -91,11 +98,17 @@ configurable duration (1–60 s) for a smooth animated reveal, then closes the g
 ## Deploy
 
 Single host, reverse-proxied by nginx (TLS) to the Node process on `127.0.0.1`.
+`/opt/crowd-canvas` is a git checkout tracking `origin/main` — **deploy by pulling**, not ad-hoc scp
+(manual file copies drift from the repo and the HTML must land in `public/`):
 
 ```bash
-scp -r server.js public package.json ecosystem.config.cjs deploy@VPS:/opt/crowd-canvas/
-ssh deploy@VPS 'cd /opt/crowd-canvas && npm install --omit=dev && pm2 restart crowd-canvas --update-env'
+# commit + push from your laptop, then on the server:
+ssh deploy@VPS 'cd /opt/crowd-canvas && git pull --ff-only origin main && npm install --omit=dev && pm2 restart ecosystem.config.cjs --update-env'
 ```
+
+> Secrets live in an untracked **`.env`** on the server (`ADMIN_TOKEN`, `OBFUSCATION_SLUG`) — see
+> `.env.example`. A restart is mandatory after any change (the HTML pages are baked into memory at
+> startup). See `DEPLOY.md` for the first-time setup.
 
 > **Run exactly one process.** All game state (the tile deck, assignment pointer, and the connected
 > player/view/admin sets) lives in memory in a single process. Do **not** use pm2 cluster mode or
