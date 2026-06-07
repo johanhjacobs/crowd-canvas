@@ -64,6 +64,27 @@ RENDER_WORKERS=4
 RENDER_WORKERS_MAX=6
 ```
 
+## Tests
+
+Use the combined runners for everyday validation:
+
+```bash
+npm test
+npm run test:syntax
+npm run test:smoke
+npm run test:all
+```
+
+Useful smoke-test filters:
+
+```bash
+npm run test:smoke -- --only render-worker-sizing
+npm run test:smoke -- --no-bail
+```
+
+The individual smoke files under `scripts/smoke/` still run directly if you want to debug one test
+in isolation.
+
 `RENDER_WORKERS` pins the requested worker count. `RENDER_WORKERS_MAX` is the safety cap that
 limits both automatic sizing and explicit overrides. The server also enforces an internal absolute
 cap of `32` workers. A good production starting point is still:

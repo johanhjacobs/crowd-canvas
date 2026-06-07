@@ -344,6 +344,22 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" https://YOUR_DOMAIN/api/config
 # https://YOUR_DOMAIN/
 ```
 
+Before or after a deploy, the local validation commands are:
+
+```bash
+npm test
+npm run test:syntax
+npm run test:smoke
+npm run test:all
+```
+
+For targeted investigation:
+
+```bash
+npm run test:smoke -- --only render-worker-sizing
+npm run test:smoke -- --no-bail
+```
+
 ---
 
 ## 11. Load test (Day 4 of the 5-day plan)
