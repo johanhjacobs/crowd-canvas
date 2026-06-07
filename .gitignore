@@ -13,7 +13,7 @@ node_modules/
 # logs / process manager
 *.log
 logs/
-reports/
+/reports/
 .pm2/
 
 # env / secrets
