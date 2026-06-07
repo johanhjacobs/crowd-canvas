@@ -7,7 +7,7 @@ import https from 'https';
 import path from 'path';
 import readline from 'readline/promises';
 import { monitorEventLoopDelay } from 'perf_hooks';
-import { buildBreakpointStepsList, isRecoveryHealthy, pickRecoveryHostMetrics } from './scripts/breakpoint-helpers.js';
+import { buildBreakpointStepsList, isRecoveryHealthy, pickRecoveryHostMetrics } from './scripts/helpers/breakpoint-helpers.js';
 
 function usage() {
   console.log(`Usage:

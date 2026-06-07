@@ -4,7 +4,7 @@ set -euo pipefail
 if [[ $# -lt 1 ]]; then
   cat <<'EOF'
 Usage:
-  scripts/run-loadtest-containers.sh <ws-url> [options]
+  scripts/ops/run-loadtest-containers.sh <ws-url> [options]
 
 Options:
   --containers N           number of load-generator containers (default 2)
@@ -20,7 +20,7 @@ Options:
   --build                  rebuild the loadtest image before starting
 
 Example:
-  scripts/run-loadtest-containers.sh ws://127.0.0.1:3000/ws \
+  scripts/ops/run-loadtest-containers.sh ws://127.0.0.1:3000/ws \
     --containers 3 --clients 20000 --rate 900 --duration 180
 EOF
   exit 1

@@ -3,7 +3,7 @@ import {
   autoRenderWorkersForCpu,
   decideRenderWorkers,
   DEFAULT_RENDER_WORKERS_MAX,
-} from './render-worker-sizing.js';
+} from '../helpers/render-worker-sizing.js';
 
 assert.equal(autoRenderWorkersForCpu(2), 1, '2 CPUs should use 1 worker');
 assert.equal(autoRenderWorkersForCpu(4), 2, '4 CPUs should use 2 workers');

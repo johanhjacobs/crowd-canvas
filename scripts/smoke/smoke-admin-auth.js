@@ -190,7 +190,7 @@ async function expectMalformedSubmissionRejected() {
 
 async function main() {
   const child = spawn(process.execPath, ['server.js'], {
-    cwd: path.resolve(__dirname, '..'),
+    cwd: path.resolve(__dirname, '..', '..'),
     env: {
       ...process.env,
       HOST,

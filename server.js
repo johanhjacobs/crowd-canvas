@@ -9,7 +9,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { randomUUID, timingSafeEqual } from 'crypto';
 import { Worker } from 'worker_threads';
-import { decideRenderWorkers, logRenderWorkerDecision } from './scripts/render-worker-sizing.js';
+import { decideRenderWorkers, logRenderWorkerDecision } from './scripts/helpers/render-worker-sizing.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 

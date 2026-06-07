@@ -1,5 +1,5 @@
 import assert from 'assert/strict';
-import { buildBreakpointStepsList, isRecoveryHealthy, pickRecoveryHostMetrics } from './breakpoint-helpers.js';
+import { buildBreakpointStepsList, isRecoveryHealthy, pickRecoveryHostMetrics } from '../helpers/breakpoint-helpers.js';
 
 const localOnlySample = {
   apiHealthy: true,

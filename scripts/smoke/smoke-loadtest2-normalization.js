@@ -1,5 +1,5 @@
 import assert from 'assert/strict';
-import { normalizeLoadtest2Target } from '../loadtest2.js';
+import { normalizeLoadtest2Target } from '../../loadtest2.js';
 
 function check(raw, expectedBase, expectedWs) {
   const actual = normalizeLoadtest2Target(raw);

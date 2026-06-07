@@ -6,9 +6,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node scripts/smoke-admin-auth.js && node scripts/smoke-production-token.js && node scripts/smoke-loadtest2-normalization.js && node scripts/smoke-breakpoint-recovery.js && node scripts/smoke-render-worker-sizing.js",
+    "test": "node scripts/smoke/smoke-admin-auth.js && node scripts/smoke/smoke-production-token.js && node scripts/smoke/smoke-loadtest2-normalization.js && node scripts/smoke/smoke-breakpoint-recovery.js && node scripts/smoke/smoke-render-worker-sizing.js",
     "loadtest:matrix": "node loadtest-matrix.js",
-    "source:zip": "bash scripts/create-source-zip.sh"
+    "source:zip": "bash scripts/ops/create-source-zip.sh"
   },
   "engines": {
     "node": ">=20"

@@ -7,7 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 async function main() {
   const child = spawn(process.execPath, ['server.js'], {
-    cwd: path.resolve(__dirname, '..'),
+    cwd: path.resolve(__dirname, '..', '..'),
     env: {
       ...process.env,
       NODE_ENV: 'production',
