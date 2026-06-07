@@ -40,8 +40,10 @@ upgrade is required.
 - Contributing factors (mostly test artifacts): the test DB was never cleared between runs so
   submissions piled to 100k+ (a real event stops at ~21k = redundancy reached, then `done`), and
   Sharp/libvips caches aggressively by default.
-- **Fix:** `sharp.cache(false)` (`server.js:18`) + `max_memory_restart: '16G'` in
-  `ecosystem.config.cjs`. Clearing the DB (re-slice) before each test keeps tests representative.
+- **Current config:** the repo now runs with `max_memory_restart: '6G'` in
+  `ecosystem.config.cjs`, and `server.js` does **not** call `sharp.cache(false)`. If memory
+  behavior becomes a problem again, re-evaluate those trade-offs against the newer worker-pool and
+  load-test hardening before copying the old 16G/cache-disabled guidance forward.
 
 ---
 
@@ -145,8 +147,9 @@ Always re-slice a **test** image first (fills the mosaic with junk + clears the 
   - no more ad-hoc `sed`/manual edits on the server without committing.
 - **One process only.** All game state is in-memory in a single fork-mode process. No pm2 cluster,
   no multiple instances — they'd hand out duplicate tiles and desync the mosaic. Scale vertically.
-- Sharp runs single-threaded in the main process (`sharp.concurrency(1)`); CPU-heavy decode/render
-  is offloaded to the worker pool (`render-worker.js`). `max_memory_restart` is now 16 G.
+- Sharp currently runs with `sharp.concurrency(2)` in the main process; CPU-heavy decode/render is
+  offloaded to the worker pool (`render-worker.js`). `max_memory_restart` is currently 6 G in
+  `ecosystem.config.cjs`.
 - **nginx serves the player page (`location = /`) statically from `/opt/crowd-canvas/public/player.html`**,
   bypassing Node. This was added because a browser reload under heavy load took ~20s (the HTML was
   served by a saturated Node main thread); static serving makes a reload near-instant. Keep it — do

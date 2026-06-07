@@ -7,6 +7,7 @@ import https from 'https';
 import path from 'path';
 import readline from 'readline/promises';
 import { monitorEventLoopDelay } from 'perf_hooks';
+import { buildBreakpointStepsList, isRecoveryHealthy, pickRecoveryHostMetrics } from './scripts/breakpoint-helpers.js';
 
 function usage() {
   console.log(`Usage:
@@ -962,36 +963,13 @@ function evaluateBreakpointStage(stage, summary, hostSummary, exitCode, recovery
   };
 }
 
-function nextNiceBelowStep(current, growth, step) {
-  const target = current * growth;
-  const candidates = [1, 2.5, 5, 10];
-  let power = 10 ** Math.floor(Math.log10(target || 1));
-  while (power <= step * 10) {
-    for (const multiplier of candidates) {
-      const candidate = multiplier * power;
-      if (candidate > current && candidate >= target) return Math.min(step, Math.round(candidate));
-    }
-    power *= 10;
-  }
-  return Math.min(step, Math.max(current + 1, Math.round(target)));
-}
-
 function buildBreakpointSteps() {
-  const steps = [];
-  let current = breakpointStart;
-  while (current <= breakpointMax) {
-    if (!steps.includes(current)) steps.push(current);
-    let next;
-    if (current < breakpointStep) {
-      next = nextNiceBelowStep(current, breakpointGrowth, breakpointStep);
-    } else {
-      next = Math.max(current + breakpointStep, Math.round(current * breakpointGrowth));
-    }
-    if (next <= current) next = current + 1;
-    current = next;
-  }
-  if (!steps.includes(breakpointMax)) steps.push(breakpointMax);
-  return [...new Set(steps)].filter(n => n >= breakpointStart && n <= breakpointMax).sort((a, b) => a - b);
+  return buildBreakpointStepsList({
+    start: breakpointStart,
+    max: breakpointMax,
+    growth: breakpointGrowth,
+    step: breakpointStep,
+  });
 }
 
 function buildEventStage(name, clientCount, drawMinOverride = drawMin, drawMaxOverride = drawMax, tilesOverride = tiles) {
@@ -1141,13 +1119,13 @@ async function cooldownAndRecover(monitor) {
   }
   const state = await getAdminState().catch(() => ({ ok: false }));
   const recent = monitor.samples.filter(sample => sample.phase === 'cooldown').at(-1);
-  return Boolean(
-    state.ok &&
-    recent &&
-    (recent.cpuPct === null || recent.cpuPct < BREAKPOINT_THRESHOLDS.cpuPct) &&
-    recent.memUsedPct < BREAKPOINT_THRESHOLDS.memoryUsedPct &&
-    recent.apiHealthy !== false
-  );
+  return isRecoveryHealthy({
+    stateOk: state.ok,
+    apiHealthy: recent?.apiHealthy,
+    hostMetrics: pickRecoveryHostMetrics(recent),
+    cpuThreshold: BREAKPOINT_THRESHOLDS.cpuPct,
+    memoryThreshold: BREAKPOINT_THRESHOLDS.memoryUsedPct,
+  });
 }
 
 function writeBreakpointArtifacts(summary, steps, metricsCsv) {
@@ -1179,6 +1157,10 @@ ${JSON.stringify(summary.breakpoint, null, 2)}
 - Safe margin: ${summary.breakpoint.safeMargin}
 - Bottleneck: ${summary.breakpoint.bottleneck}
 - Effective host metrics source: ${metricsHost ? `remote app host via SSH (${metricsHost})` : 'local generator only'}
+
+## Tested Points
+
+${steps.map(step => `- ${step.users} users: ${step.result.toUpperCase()}`).join('\n')}
 
 ## Bottleneck Evidence
 

@@ -325,6 +325,17 @@ How to read the sweep results:
 This is most useful for performance tuning. It does not replace human review of moderation quality
 or operator usability.
 
+### Clean source bundle
+
+To create a source ZIP for sharing or archival without runtime/generated files:
+
+```bash
+npm run source:zip
+```
+
+That excludes `.git`, `node_modules`, `data`, `logs`, `reports`, `.indigo`, and common OS/editor
+noise. It does not delete any local runtime files.
+
 ### Interpreting the output
 
 The live status lines and final matrix include a few fields that matter most:
