@@ -172,7 +172,9 @@ server {
         proxy_send_timeout  7200;
     }
 
-    location /dropveters-admin {
+    # Suffix-regex so the obfuscation slug (OBFUSCATION_SLUG in .env) can change
+    # without editing nginx — any /<slug>-admin still gets Basic auth.
+    location ~ -admin$ {
         auth_basic "Admin";
         auth_basic_user_file /etc/nginx/.htpasswd-canvas;
         proxy_pass http://app;

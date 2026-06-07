@@ -87,9 +87,9 @@ what it's sent. The live pixel filter and per-tile review/clear are the server-s
 - The **obfuscation slug** in the admin/view/seed paths (`/<slug>-admin`, `/<slug>-view`,
   `/api/<slug>-seed.png`) is read from **`OBFUSCATION_SLUG`** in `.env` (default `dropveters`), so
   the real slug isn't pinned in source. The server injects the seed URL into the trusted pages at
-  startup. Changing the slug also requires updating the nginx `location /<slug>-admin` Basic-auth
-  block. This is security-by-obscurity — only the admin token + nginx Basic auth are real access
-  control.
+  startup. Changing the slug needs only `.env` + a restart — nginx matches the admin page with a
+  slug-independent `location ~ -admin$` regex, so it needs no edit. This is security-by-obscurity —
+  only the admin token + nginx Basic auth are real access control.
 
 **Restart** wipes all submissions and reshuffles the deck without re-uploading the image.  
 **Auto-fill & finish** gradually fills any undrawn tiles with their reference images over a
