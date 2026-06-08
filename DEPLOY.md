@@ -105,105 +105,43 @@ apt-get install -y nginx
 systemctl enable nginx
 ```
 
-Create the config file:
-```bash
-nano /etc/nginx/sites-available/crowd-canvas
-```
-
-Paste this (replace `YOUR_DOMAIN` throughout):
-
-```nginx
-limit_req_zone $binary_remote_addr zone=player:10m rate=50r/s;
-
-upstream app {
-    server 127.0.0.1:3100;
-    keepalive 512;
-}
-
-server {
-    listen 80;
-    server_name YOUR_DOMAIN;
-    return 301 https://$host$request_uri;
-}
-
-server {
-    # backlog=65535: raise the accept queue from nginx's default 511 so a connection
-    # storm (the QR reveal) doesn't overflow it. An overflow drops SYNs → TCP retransmits
-    # with exponential backoff → ~20s "Connecting" for unlucky clients. Needs
-    # net.core.somaxconn + tcp_max_syn_backlog raised too (see step 3) AND a full
-    # `systemctl restart nginx` to take effect (reload reuses the old listen socket).
-    listen 443 ssl http2 backlog=65535;
-    server_name YOUR_DOMAIN;
-
-    ssl_certificate     /etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem;
-    ssl_protocols       TLSv1.2 TLSv1.3;
-
-    gzip on;
-    gzip_types text/html application/json text/css application/javascript;
-    gzip_min_length 1024;
-
-    # Serve the player page straight from disk — it never touches Node, so a
-    # browser reload is instant even when the app is saturated under load.
-    # (player.html has no admin token, unlike admin/view, so it's safe to serve
-    # statically.) The short cache means a reload within 60s is a pure browser-
-    # cache hit with zero server round-trip.
-    location = / {
-        root /opt/crowd-canvas/public;
-        try_files /player.html =404;
-        add_header Cache-Control "public, max-age=60";
-    }
-
-    location /refs/ {
-        alias /opt/crowd-canvas/data/refs/;
-        expires 1h;
-        add_header Cache-Control "public, immutable";
-    }
-
-    location /ws {
-        limit_req zone=player burst=500 nodelay;
-        proxy_pass http://app;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade    $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host       $host;
-        proxy_set_header X-Real-IP  $remote_addr;
-        proxy_read_timeout  7200;
-        proxy_send_timeout  7200;
-    }
-
-    # Suffix-regex so the obfuscation slug (OBFUSCATION_SLUG in .env) can change
-    # without editing nginx — any /<slug>-admin still gets Basic auth.
-    location ~ -admin$ {
-        auth_basic "Admin";
-        auth_basic_user_file /etc/nginx/.htpasswd-canvas;
-        proxy_pass http://app;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-    }
-
-    location / {
-        proxy_pass http://app;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_set_header Host      $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        client_max_body_size 30M;
-    }
-}
-```
+The full site config is tracked in the repo at **`deploy/nginx-crowd-canvas.conf`** —
+copy it into place rather than hand-typing it:
 
 ```bash
-# Edit nginx.conf to raise worker connections
+cp /opt/crowd-canvas/deploy/nginx-crowd-canvas.conf /etc/nginx/sites-available/crowd-canvas
+# Then set your domain + certs: either edit server_name / the ssl_certificate paths,
+# or run `certbot --nginx -d YOUR_DOMAIN` (it rewrites the listen/ssl lines for you).
+```
+
+What that config does, and why:
+
+- **`limit_req` per-IP is deliberately generous** (`rate=1000r/s`, `burst=20000`) so a
+  whole venue behind one NAT IP is **not** throttled — the real, IP-agnostic pacing is
+  the in-app admission governor (see `ADMISSION.md`). It is *not* a security control.
+- **Static player page** (`location = /` from disk, 60 s cache) so a reload is instant
+  even under load. `player.html` carries no token, so serving it raw is safe.
+- **`backlog=65535`** on `listen 443` so the QR-reveal SYN storm doesn't overflow the
+  accept queue (needs `somaxconn` / `tcp_max_syn_backlog` from §3 **and** a full
+  `systemctl restart nginx` — a plain reload reuses the old listen socket).
+- **`location ~ -admin$`** Basic auth — a suffix-regex, so changing `OBFUSCATION_SLUG`
+  in `.env` needs no nginx edit. (Anchored with `$` so it matches only `/<slug>-admin`.)
+- **`X-Forwarded-For` / `X-Forwarded-Proto`** passed through for correct logging and
+  proxy awareness.
+
+```bash
+# Global tuning lives in nginx.conf (tracked too): worker_processes auto;
+# worker_connections 65536; inside events {}.
 nano /etc/nginx/nginx.conf
-# Set these two lines:
-#   worker_processes auto;
-#   worker_connections 4096;   <- inside the events {} block
 
 ln -s /etc/nginx/sites-available/crowd-canvas /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl reload nginx
 ```
+
+> **Keep git and the server in sync.** `deploy/nginx-crowd-canvas.conf` is an exact
+> mirror of the deployed file — detect drift with:
+> `diff <(sudo cat /etc/nginx/sites-available/crowd-canvas) deploy/nginx-crowd-canvas.conf`
 
 > **Keep `sites-enabled/crowd-canvas` a symlink, not a copy.** If it's a plain
 > file, edits to `sites-available/` won't take effect (we hit exactly this — the
