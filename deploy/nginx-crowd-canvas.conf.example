@@ -1,0 +1,94 @@
+# Crowd Canvas — nginx site config (EXAMPLE).
+#
+# Deployed copy: /etc/nginx/sites-available/crowd-canvas (symlink into sites-enabled).
+# Replace YOUR_DOMAIN throughout. The `listen 443 ssl …` + certificate lines are
+# added/managed by `certbot --nginx -d YOUR_DOMAIN`. Full first-time runbook: DEPLOY.md §5.
+#
+# Philosophy: connection rate-limiting here is intentionally GENEROUS. The real,
+# IP-agnostic pacing is done by the in-app admission governor (see ADMISSION.md) —
+# nginx must only avoid dropping legitimate connections, including a whole venue
+# behind a single NAT IP.
+
+# Per-IP request bucket. burst=20000 lets ONE ip (the entire venue) open up to 20k
+# connections at once; rate=1000/s refills it (covers reconnects). Sized for a 20k
+# crowd. nodelay = admit immediately, reject only beyond burst+rate (anti-abuse cap).
+limit_req_zone $binary_remote_addr zone=player:10m rate=1000r/s;
+
+upstream app {
+    server 127.0.0.1:3100;        # pm2 runs the app on 3100
+    keepalive 512;
+}
+
+server {
+    listen 80;
+    server_name YOUR_DOMAIN;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    # backlog=65535: raise the accept queue so the QR-reveal SYN storm doesn't
+    # overflow nginx's default (511). Needs net.core.somaxconn + tcp_max_syn_backlog
+    # raised too (DEPLOY.md §3) AND a full `systemctl restart nginx` to take effect
+    # (a plain reload reuses the old listen socket). Certbot manages these lines.
+    listen 443 ssl http2 backlog=65535;
+    server_name YOUR_DOMAIN;
+
+    ssl_certificate     /etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    gzip on;
+    gzip_types text/html application/json text/css application/javascript;
+    gzip_min_length 1024;
+
+    # Player page (/) served straight from disk — never touches Node, so a browser
+    # reload is instant even under load. player.html carries no admin token (unlike
+    # the admin/view pages), so it is safe to serve statically.
+    location = / {
+        root /opt/crowd-canvas/public;
+        try_files /player.html =404;
+        add_header Cache-Control "public, max-age=60";
+    }
+
+    # Reference tile crops — from disk, cached.
+    location /refs/ {
+        alias /opt/crowd-canvas/data/refs/;
+        expires 1h;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # Player WebSocket. Generous burst (see limit_req_zone above) so a venue behind
+    # one IP is NOT throttled; the app admission governor paces actual game entry.
+    location /ws {
+        limit_req zone=player burst=20000 nodelay;
+        proxy_pass http://app;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host       $host;
+        proxy_set_header X-Real-IP  $remote_addr;
+        proxy_read_timeout  7200;     # keep idle player sockets alive through a long game
+        proxy_send_timeout  7200;
+    }
+
+    # Admin page — HTTP Basic auth. Suffix-regex `~ -admin$` matches any
+    # /<slug>-admin, so changing OBFUSCATION_SLUG in .env needs NO nginx edit.
+    # Create the password file once: htpasswd -c /etc/nginx/.htpasswd-canvas admin
+    location ~ -admin$ {
+        auth_basic "Admin";
+        auth_basic_user_file /etc/nginx/.htpasswd-canvas;
+        proxy_pass http://app;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+    }
+
+    # Everything else (the public view page, /api/*) → Node.
+    location / {
+        proxy_pass http://app;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host      $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        client_max_body_size 30M;     # admin image uploads
+    }
+}
