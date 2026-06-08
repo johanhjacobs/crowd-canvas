@@ -393,6 +393,7 @@ let quoteTimer = null;         // word-by-word reveal interval
 let connectStart = 0;          // when this connection began (for the deliberate delay)
 let firstTile = true;          // first tile of this connection gets the deliberate hold
 let pendingTile = null;        // tile held behind the load screen during the delay
+let startedDrawing = false;    // once the first piece is shown, no more quotes (only at the start)
 
 // A reload/first-join must never beat the normal in-game pace, even when the
 // server is idle: total time from connect to first tile is held to ≥ this.
@@ -404,7 +405,7 @@ function paintQuote() {
   if (!tEl) return;
   clearInterval(quoteTimer); quoteTimer = null;
   tEl.textContent = ''; aEl.textContent = ''; aEl.style.opacity = '0';
-  if (!quotes.length) return;
+  if (startedDrawing || !quotes.length) return; // quotes only before the first piece, not mid-game
   const q = quotes[Math.floor(Math.random() * quotes.length)];
   const words = ('“' + q.text + '”').split(' ');
   let i = 0;
@@ -456,6 +457,7 @@ function hideWait() {
 // can call it after the countdown).
 function revealTile(m) {
   hideWait();
+  startedDrawing = true;  // from here on, wait screens are quote-free (mid-game)
   similarityRetries = 0; // fresh tile — reset retry counter
   tileReceivedAt = Date.now();
   tileId = m.tileId; setBusy(false); clearDraw(); ghostClear(); updateTileUI();
