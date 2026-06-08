@@ -158,7 +158,6 @@
           <div style="display:flex;justify-content:space-between;margin-top:7px;font-size:11px;color:var(--muted);">
             <span><b id="nOnlineQ" style="color:var(--ink);">0</b> live</span>
             <span>admitting <b id="admitRateQ" style="color:var(--ink);">500</b>/s</span>
-            <span><b id="waitingCount" style="color:var(--ink);">0</b> pre-game</span>
           </div>
         </div>
         <div class="stats">
@@ -427,7 +426,6 @@ function connect() {
         document.getElementById('delaySlider').value = m.viewDelay;
         document.getElementById('delayVal').textContent = m.viewDelay === 0 ? 'instant' : m.viewDelay + 's';
       }
-      document.getElementById('waitingCount').textContent = (m.waitingCount || 0).toLocaleString();
       updateQueueUI(m.admitQueueSize || 0);
       updateStats();
       setIncompleteUI();
@@ -470,7 +468,7 @@ function connect() {
       const q = document.getElementById('nOnlineQ'); if (q) q.textContent = s;
     }
     else if (m.type === 'waiting-count') {
-      document.getElementById('waitingCount').textContent = m.count.toLocaleString();
+      updateQueueUI(m.count); // live admission-queue size → prominent counter + bar + ETA
     }
     else if (m.type === 'tile-cleared') {
       const t = tilesMap.get(m.tileId);
