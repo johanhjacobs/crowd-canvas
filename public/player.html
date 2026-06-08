@@ -211,11 +211,7 @@ function maybeShowRateLimit() {
   if (!rateLimit) return false;
   const elapsed = Date.now() - tileReceivedAt;
   const remaining = Math.ceil((rateLimit * 1000 - elapsed) / 1000);
-  if (remaining > 0) {
-    showWait('Easy there!', 'Lining up your next piece…', remaining,
-      () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); });
-    return true;
-  }
+  if (remaining > 0) { showRateLimit(remaining); return true; }
   return false;
 }
 
@@ -577,8 +573,7 @@ function connect() {
     } else if (m.type === 'config') {
       applyConfig(m);
     } else if (m.type === 'rate-limited') {
-      showWait('Easy there!', 'Lining up your next piece…', m.seconds,
-        () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); });
+      showRateLimit(m.seconds);
     } else if (m.type === 'tile') {
       // Deliberate load: hold the FIRST tile of a connection behind the load screen
       // so connect→first-tile is always ≥ deliberateMs(). A reload on an idle server
@@ -599,11 +594,10 @@ function connect() {
       showWait('Almost there!', 'Finding you a piece to draw…<br>Keep this screen open.', 0);
       setTimeout(() => ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: 'next' })), 2000);
     } else if (m.type === 'accepted') {
-      // Submission accepted — same load screen for the rate-limit pause, then auto
-      // next. Keeps a reload and normal between-piece timing identical.
+      // Submission accepted — between-piece countdown runs IN the tile card
+      // (showRateLimit), not on the full-screen load screen.
       if (m.rateLimitSeconds > 0) {
-        showWait('Nice one!', 'Next piece coming up…', m.rateLimitSeconds,
-          () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); });
+        showRateLimit(m.rateLimitSeconds);
       } else {
         setTimeout(() => {
           if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
