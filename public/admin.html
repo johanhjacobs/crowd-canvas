@@ -651,6 +651,19 @@ document.addEventListener('pointerdown',  e => { if (e.target && e.target.type =
 document.addEventListener('pointerup',    () => { _sliderDragging = false; });
 document.addEventListener('pointercancel',() => { _sliderDragging = false; });
 
+// Debounced POST — sliders fire 'input' on every pixel; flooding the server with
+// POSTs that echo back as broadcasts bounces the slider just after release.
+// Coalesce per-URL into one POST ~150 ms after the last change.
+const _postPatch = {}, _postTimer = {};
+function debouncedPost(url, patch) {
+  _postPatch[url] = Object.assign(_postPatch[url] || {}, patch);
+  clearTimeout(_postTimer[url]);
+  _postTimer[url] = setTimeout(() => {
+    const body = _postPatch[url]; _postPatch[url] = {};
+    afetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  }, 150);
+}
+
 function applyConfigUI(cfg) {
   if (cfg.defaultPieces !== undefined) document.getElementById('pieces').value = cfg.defaultPieces;
   if (cfg.defaultIncludeSolidBlack !== undefined) document.getElementById('includeSolid').checked = !!cfg.defaultIncludeSolidBlack;
@@ -721,22 +734,19 @@ document.getElementById('saveBlend').addEventListener('click', async () => {
 document.getElementById('simSlider').addEventListener('input', function() {
   const v = +this.value;
   document.getElementById('simVal').textContent = v === 0 ? 'off' : Math.round(v * 100) + '%';
-  afetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ similarityThreshold: v }) });
+  debouncedPost('/api/config', { similarityThreshold: v });
 });
 
 document.getElementById('straySlider').addEventListener('input', function() {
   const v = +this.value;
   document.getElementById('strayVal').textContent = v.toFixed(2).replace(/\.00$/, '');
-  afetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ maxStrayInk: v }) });
+  debouncedPost('/api/config', { maxStrayInk: v });
 });
 
 document.getElementById('covSlider').addEventListener('input', function() {
   const v = +this.value;
   document.getElementById('covVal').textContent = v === 0 ? 'off' : Math.round(v * 100) + '%';
-  afetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ minCoverage: v }) });
+  debouncedPost('/api/config', { minCoverage: v });
 });
 
 // ── admission-queue monitor ────────────────────────────────────────────────
@@ -761,15 +771,13 @@ document.getElementById('admitRateSlider').addEventListener('input', function() 
   const v = +this.value;
   document.getElementById('admitRateVal').textContent = v + '/s';
   updateQueueUI(lastQueueSize); // refresh ETA/rate readout immediately
-  afetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ admitRate: v }) });
+  debouncedPost('/api/config', { admitRate: v });
 });
 
 document.getElementById('rateLimitSlider').addEventListener('input', function() {
   const v = +this.value;
   document.getElementById('rateLimitVal').textContent = v === 0 ? 'off' : v + 's';
-  afetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rateLimit: v }) });
+  debouncedPost('/api/config', { rateLimit: v });
 });
 
 function setGhostModeUI(mode) {
@@ -801,7 +809,7 @@ document.getElementById('vcBg').addEventListener('click', () => {
 document.getElementById('delaySlider').addEventListener('input', function() {
   const v = +this.value;
   document.getElementById('delayVal').textContent = v === 0 ? 'instant' : v + 's';
-  afetch('/api/view/delay', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({delay:v}) });
+  debouncedPost('/api/view/delay', { delay: v });
 });
 
 function setSidebarWidthUI(w) {
