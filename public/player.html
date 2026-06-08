@@ -423,12 +423,14 @@ function paintQuote() {
 // the deliberate reload delay, and the between-pieces pause. Shows a fresh quote
 // and (optionally) a countdown that calls onDone when it reaches 0.
 function showWait(title, msg, seconds, onDone) {
+  const screen = document.getElementById('waiting-screen');
+  const wasShown = screen.classList.contains('show');
   clearInterval(waitTimer); waitTimer = null;
   document.getElementById('waitingTitle').textContent = title;
   document.getElementById('waitingMsg').innerHTML = msg || '';
   const countEl = document.getElementById('waitCount');
-  paintQuote();
-  document.getElementById('waiting-screen').classList.add('show');
+  if (!wasShown) paintQuote();   // pick a quote only when the screen first appears — don't rotate while waiting
+  screen.classList.add('show');
   setBusy(true);
   if (seconds > 0) {
     let rem = Math.ceil(seconds);
@@ -566,10 +568,9 @@ function connect() {
       setTimeout(() => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); }, Math.random() * 2000);
     } else if (m.type === 'waiting') {
       showWait('Get ready!', 'The game starts soon.<br>Keep this screen open.', 0);
-      // retry every 3s (rotating the quote) in case the open signal was missed
+      // retry every 3s in case the open signal was missed (quote stays put)
       setTimeout(function retry() {
         if (!document.getElementById('waiting-screen').classList.contains('show')) return;
-        paintQuote();
         if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
         setTimeout(retry, 3000);
       }, 3000);
