@@ -938,7 +938,7 @@ const noCache = (_, res, next) => { res.set('Cache-Control', 'no-store'); next()
 
 // ── auth middleware ───────────────────────────────────────────────────────────
 // Public GET endpoints (players need these — no token required):
-const PUBLIC_API = new Set(['/config', '/export.png', '/export-thumb.png', `/${SLUG}-seed.png`]);
+const PUBLIC_API = new Set(['/config', '/quotes', '/export.png', '/export-thumb.png', `/${SLUG}-seed.png`]);
 app.use('/api', (req, res, next) => {
   if (!ADMIN_TOKEN) return next(); // no token set → dev mode, allow all
   if (req.method === 'GET' && PUBLIC_API.has(req.path)) return next();
@@ -1193,6 +1193,29 @@ app.post('/api/config', (req, res) => {
 });
 
 app.get('/api/config', (_, res) => res.json(getConfig()));
+
+// Quotes for the player's nerdy load screen. quotes.csv lives next to the app
+// (/opt/crowd-canvas/quotes.csv), one per line:  "Quote text"<TAB>Author
+// Re-read when the file's mtime changes so edits show up without a restart.
+const QUOTES_FILE = path.join(__dirname, 'quotes.csv');
+let _quotesCache = null, _quotesMtime = -1;
+function getQuotes() {
+  try {
+    const mt = fs.statSync(QUOTES_FILE).mtimeMs;
+    if (_quotesCache && mt === _quotesMtime) return _quotesCache;
+    const out = [];
+    for (const line of fs.readFileSync(QUOTES_FILE, 'utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const tab = line.indexOf('\t');
+      const text = (tab >= 0 ? line.slice(0, tab) : line).trim().replace(/^"|"$/g, '');
+      const author = tab >= 0 ? line.slice(tab + 1).trim() : '';
+      if (text) out.push({ text, author });
+    }
+    _quotesCache = out; _quotesMtime = mt;
+    return out;
+  } catch { return _quotesCache || []; }
+}
+app.get('/api/quotes', (_, res) => res.json(getQuotes()));
 app.get('/api/has-previous-image', (_, res) => res.json({ exists: fs.existsSync(path.join(DATA, 'original.png')) }));
 app.get('/api/state', (_, res) => res.json(adminState()));
 

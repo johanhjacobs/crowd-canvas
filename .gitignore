@@ -19,6 +19,9 @@ logs/
 .env
 .env.local
 
+# nerdy load-screen quotes — maintained on the server, not in git (see quotes.example.csv)
+quotes.csv
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

@@ -82,6 +82,15 @@
   #waiting-screen.show, #done.show { display: flex; }
   #waiting-screen h2, #done h2 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -.01em; }
   #waiting-screen p,  #done p  { margin: 0; font-size: 14px; opacity: .6; line-height: 1.6; }
+  #waiting-screen .wait-count { font-size: 46px; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1; }
+  #waiting-screen .wait-count:empty { display: none; }
+  #quoteBox { margin: 22px 0 0; max-width: 340px; opacity: 0; }
+  #quoteBox.in { animation: quoteIn .6s ease forwards; }
+  #quoteText { margin: 0; font-size: 17px; font-style: italic; font-weight: 500; line-height: 1.5; opacity: .92; }
+  #quoteText:empty { display: none; }
+  #quoteAuthor { margin: 10px 0 0; font-size: 12px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; opacity: .5; }
+  #quoteAuthor:empty { display: none; }
+  @keyframes quoteIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
   #finalLink {
     display: block; width: min(78vw, 320px); color: #fff; text-decoration: none;
   }
@@ -168,6 +177,11 @@
   <div class="pulse"></div>
   <h2 id="waitingTitle">Get ready!</h2>
   <p id="waitingMsg">The game starts soon.<br>Keep this screen open.</p>
+  <div id="waitCount" class="wait-count"></div>
+  <figure id="quoteBox">
+    <blockquote id="quoteText"></blockquote>
+    <figcaption id="quoteAuthor"></figcaption>
+  </figure>
 </div>
 <div id="done">
   <h2>Thank you!</h2>
@@ -200,7 +214,11 @@ function maybeShowRateLimit() {
   if (!rateLimit) return false;
   const elapsed = Date.now() - tileReceivedAt;
   const remaining = Math.ceil((rateLimit * 1000 - elapsed) / 1000);
-  if (remaining > 0) { showRateLimit(remaining); return true; }
+  if (remaining > 0) {
+    showWait('Easy there!', 'Lining up your next piece…', remaining,
+      () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); });
+    return true;
+  }
   return false;
 }
 
@@ -369,6 +387,89 @@ function buildSubmitCanvas() {
 
 // ── networking ────────────────────────────────────────────────────────────────
 let ws, connectWatchdog = null, reconnectAttempts = 0;
+
+// ── nerdy load screen: quotes + deliberate first-tile delay ───────────────────
+let quotes = [];
+fetch('/api/quotes').then(r => r.json()).then(q => { if (Array.isArray(q)) quotes = q; }).catch(() => {});
+let waitTimer = null;          // countdown interval for the wait screen
+let connectStart = 0;          // when this connection began (for the deliberate delay)
+let firstTile = true;          // first tile of this connection gets the deliberate hold
+let pendingTile = null;        // tile held behind the load screen during the delay
+
+// A reload/first-join must never beat the normal in-game pace, even when the
+// server is idle: total time from connect to first tile is held to ≥ this.
+// `rateLimit` (seconds between pieces, set from config below) is reused here.
+function deliberateMs() { return Math.max(5000, (rateLimit || 0) * 1000); }
+
+function paintQuote() {
+  const box = document.getElementById('quoteBox');
+  if (!box) return;
+  const tEl = document.getElementById('quoteText'), aEl = document.getElementById('quoteAuthor');
+  if (quotes.length) {
+    const q = quotes[Math.floor(Math.random() * quotes.length)];
+    tEl.textContent = '“' + q.text + '”';
+    aEl.textContent = q.author ? '— ' + q.author : '';
+  } else { tEl.textContent = ''; aEl.textContent = ''; }
+  box.classList.remove('in'); void box.offsetWidth; box.classList.add('in'); // restart fade-in
+}
+
+// One screen for every "waiting for a tile" moment: pre-game, governor queue,
+// the deliberate reload delay, and the between-pieces pause. Shows a fresh quote
+// and (optionally) a countdown that calls onDone when it reaches 0.
+function showWait(title, msg, seconds, onDone) {
+  clearInterval(waitTimer); waitTimer = null;
+  document.getElementById('waitingTitle').textContent = title;
+  document.getElementById('waitingMsg').innerHTML = msg || '';
+  const countEl = document.getElementById('waitCount');
+  paintQuote();
+  document.getElementById('waiting-screen').classList.add('show');
+  setBusy(true);
+  if (seconds > 0) {
+    let rem = Math.ceil(seconds);
+    countEl.textContent = rem;
+    waitTimer = setInterval(() => {
+      rem--;
+      if (rem > 0) { countEl.textContent = rem; }
+      else {
+        clearInterval(waitTimer); waitTimer = null;
+        countEl.textContent = '';
+        hideWait();
+        if (onDone) onDone();
+      }
+    }, 1000);
+  } else {
+    countEl.textContent = '';
+  }
+}
+function hideWait() {
+  clearInterval(waitTimer); waitTimer = null;
+  document.getElementById('waiting-screen').classList.remove('show');
+}
+
+// Actually show a tile and unlock drawing (extracted so the deliberate-load hold
+// can call it after the countdown).
+function revealTile(m) {
+  hideWait();
+  similarityRetries = 0; // fresh tile — reset retry counter
+  tileReceivedAt = Date.now();
+  tileId = m.tileId; setBusy(false); clearDraw(); ghostClear(); updateTileUI();
+
+  // Solid black tile: warn the player to fill it completely, then let them draw normally.
+  const hint = document.getElementById('hint');
+  hint.textContent = m.fill === 0
+    ? '⬛ This piece is fully black — scribble it all in!'
+    : ghostMode === 'immediate'
+      ? '✏️ Trace the image on the canvas below'
+      : '✏️ Copy this image on the canvas below';
+
+  const img = new Image();
+  img.onload = () => {
+    curRef = img; drawRef(img);
+    document.getElementById('ghost').style.backgroundImage = `url(${img.src})`;
+    if (ghostMode === 'immediate') setGhostOpacity(0.40);
+  };
+  img.src = m.refUrl + '?t=' + Date.now();
+}
 function setBootMsg(t) { const el = document.getElementById('bootMsg'); if (el) el.textContent = t; }
 function dismissBoot() {
   if (connectWatchdog) { clearTimeout(connectWatchdog); connectWatchdog = null; }
@@ -381,6 +482,8 @@ function connect() {
   // drop any half-open previous socket so its handlers can't double-fire
   if (ws) { try { ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null; ws.close(); } catch (e) {} }
   if (reconnectAttempts > 0) setBootMsg('Reconnecting…');
+  connectStart = Date.now();   // for the deliberate first-tile delay
+  firstTile = true;
 
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?role=player`);
@@ -447,58 +550,51 @@ function connect() {
     if (m.type === 'done') {
       showDone();
     } else if (m.type === 'resume') {
-      // admin reopened the game — leave the done screen and rejoin (staggered)
+      // admin reopened the game — leave the done screen and rejoin (staggered),
+      // treated like a fresh join so the deliberate load screen plays again.
       document.getElementById('done').classList.remove('show');
-      document.getElementById('waiting-screen').classList.remove('show');
+      hideWait();
+      firstTile = true; connectStart = Date.now();
       setTimeout(() => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); }, Math.random() * 2000);
     } else if (m.type === 'waiting') {
-      document.getElementById('waitingTitle').textContent = 'Get ready!';
-      document.getElementById('waitingMsg').innerHTML = 'The game starts soon.<br>Keep this screen open.';
-      document.getElementById('waiting-screen').classList.add('show');
-      // retry every 3s in case the open signal was missed
+      showWait('Get ready!', 'The game starts soon.<br>Keep this screen open.', 0);
+      // retry every 3s (rotating the quote) in case the open signal was missed
       setTimeout(function retry() {
         if (!document.getElementById('waiting-screen').classList.contains('show')) return;
+        paintQuote();
         if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
         setTimeout(retry, 3000);
       }, 3000);
     } else if (m.type === 'config') {
       applyConfig(m);
     } else if (m.type === 'rate-limited') {
-      showRateLimit(m.seconds);
+      showWait('Easy there!', 'Lining up your next piece…', m.seconds,
+        () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); });
     } else if (m.type === 'tile') {
-      similarityRetries = 0; // fresh tile — reset retry counter
-      tileReceivedAt = Date.now();
-      document.getElementById('waiting-screen').classList.remove('show');
-      tileId = m.tileId; setBusy(false); clearDraw(); ghostClear(); updateTileUI();
-
-      // Solid black tile: warn the player to fill it completely, then let them draw normally.
-      const hint = document.getElementById('hint');
-      hint.textContent = m.fill === 0
-        ? '⬛ This piece is fully black — scribble it all in!'
-        : ghostMode === 'immediate'
-          ? '✏️ Trace the image on the canvas below'
-          : '✏️ Copy this image on the canvas below';
-
-      const img = new Image();
-      img.onload = () => {
-        curRef = img; drawRef(img);
-        document.getElementById('ghost').style.backgroundImage = `url(${img.src})`;
-        if (ghostMode === 'immediate') setGhostOpacity(0.40);
-      };
-      img.src = m.refUrl + '?t=' + Date.now();
+      // Deliberate load: hold the FIRST tile of a connection behind the load screen
+      // so connect→first-tile is always ≥ deliberateMs(). A reload on an idle server
+      // gets no head start; time already spent queued counts toward it.
+      if (firstTile) {
+        firstTile = false;
+        const remaining = deliberateMs() - (Date.now() - connectStart);
+        if (remaining > 600) {
+          pendingTile = m;
+          showWait('Loading your piece…', 'Sharpen your pencil!', remaining / 1000,
+            () => { const t = pendingTile; pendingTile = null; if (t) revealTile(t); });
+          return;
+        }
+      }
+      revealTile(m);
     } else if (m.type === 'wait') {
-      // Server is briefly at capacity (render queue busy) — show the same centred,
-      // full-screen overlay as the pre-game wait so the "finding a tile" pause reads
-      // as intentional instead of a half-loaded GUI. Hidden again on the next 'tile'.
-      document.getElementById('waitingTitle').textContent = 'Almost there!';
-      document.getElementById('waitingMsg').innerHTML = 'Finding you a piece to draw…<br>Keep this screen open.';
-      document.getElementById('waiting-screen').classList.add('show');
+      // Server briefly at capacity (render queue busy) — same load screen.
+      showWait('Almost there!', 'Finding you a piece to draw…<br>Keep this screen open.', 0);
       setTimeout(() => ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: 'next' })), 2000);
     } else if (m.type === 'accepted') {
-      // Submission accepted — if server signals a rate-limit delay, show countdown first.
-      // showRateLimit() sends 'next' automatically when countdown ends.
+      // Submission accepted — same load screen for the rate-limit pause, then auto
+      // next. Keeps a reload and normal between-piece timing identical.
       if (m.rateLimitSeconds > 0) {
-        showRateLimit(m.rateLimitSeconds);
+        showWait('Nice one!', 'Next piece coming up…', m.rateLimitSeconds,
+          () => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' })); });
       } else {
         setTimeout(() => {
           if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
@@ -521,7 +617,7 @@ function connect() {
 }
 
 function showDone() {
-  document.getElementById('waiting-screen').classList.remove('show');
+  hideWait();
   document.getElementById('done').classList.add('show');
   tileId = null;
   updateTileUI();
