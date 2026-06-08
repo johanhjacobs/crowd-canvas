@@ -841,28 +841,15 @@ function assignTile(hasSubmitted = false) {
   const { tiles, tileIds, submissionCounts, activeCount, redundancy } = state;
   const n = tileIds.length;
 
-  // Breadth-first phase: while any tile is still UNTOUCHED — no submissions in and
-  // nobody drawing it right now (subs + active === 0) — hand those out first. This
-  // lights the whole picture up to 1-deep before any tile deepens toward redundancy,
-  // so a recognizable result appears as fast as possible. Walking from deckPos keeps
-  // the scattered/organic fill order and round-robin fairness. A tile abandoned mid-
-  // draw drops back to active 0 and so re-enters this pass, fixing lingering gaps.
-  for (let i = 0; i < n; i++) {
-    const idx = (state.deckPos + i) % n;
-    const id  = tileIds[idx];
-    const t   = tiles.get(id);
-    if ((submissionCounts.get(id) || 0) + (activeCount.get(id) || 0) !== 0) continue;
-    if (!hasSubmitted && t.fill === 0) continue; // first-timer — skip solid black
-    state.deckPos = (idx + 1) % n;
-    activeCount.set(id, 1); // first claim — was provably 0
-    return t;
-  }
-
-  // Deepening phase: every tile is touched — now fill toward redundancy. Walk the
-  // shuffled deck from deckPos and take the first eligible tile, skipping ones that:
-  //   (a) are already at the submission cap,
-  //   (b) already have redundancy active drawers right now, or
-  //   (c) are solid black (fill===0) for players on their first tile.
+  // Breadth-first: hand out the LEAST-COVERED eligible tile, ranked by
+  // (submissions in, then drawers currently on it). A tile with 0 submissions always
+  // outranks one with 1 — even if the 0-tile is already being drawn — so the whole
+  // picture fills to 1-deep before ANY tile deepens toward redundancy, and freed
+  // players pile onto unfinished tiles instead of deepening already-drawn ones. That
+  // drains the remaining blanks as fast as possible (coverage counts submissions, not
+  // claims). Walking from deckPos with a strict "<" keeps the scattered fill order
+  // and round-robin fairness among equally-covered tiles.
+  let best = null, bestSubs = Infinity, bestActive = Infinity;
   for (let i = 0; i < n; i++) {
     const idx = (state.deckPos + i) % n;
     const id  = tileIds[idx];
@@ -872,14 +859,19 @@ function assignTile(hasSubmitted = false) {
     if (subs >= redundancy) continue;
     if (active >= redundancy) continue;
     if (!hasSubmitted && t.fill === 0) continue; // first-timer — skip solid black
-    state.deckPos = (idx + 1) % n;
-    activeCount.set(id, active + 1);
-    return t;
+    if (subs < bestSubs || (subs === bestSubs && active < bestActive)) {
+      best = { idx, t, active }; bestSubs = subs; bestActive = active;
+      if (subs === 0 && active === 0) break; // nothing can beat an untouched, unclaimed tile
+    }
+  }
+  if (best) {
+    state.deckPos = (best.idx + 1) % n;
+    activeCount.set(best.t.id, best.active + 1);
+    return best.t;
   }
 
-  // All preferred tiles done or occupied — fall back to any incomplete tile.
-  // This also covers the edge case where only black tiles remain: a first-timer
-  // gets one rather than waiting forever.
+  // Fallback: only black tiles left for a first-timer, or everything is saturated
+  // with active drawers — give any still-incomplete tile rather than waiting forever.
   for (let i = 0; i < n; i++) {
     const id = tileIds[(state.deckPos + i) % n];
     if ((submissionCounts.get(id) || 0) < redundancy) {
