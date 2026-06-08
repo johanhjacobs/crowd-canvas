@@ -160,6 +160,11 @@
             <span>admitting <b id="admitRateQ" style="color:var(--ink);">500</b>/s</span>
           </div>
         </div>
+        <div style="margin-top:10px;">
+          <label>Admit rate — <span id="admitRateVal">800/s</span></label>
+          <input type="range" id="admitRateSlider" min="10" max="1000" step="10" value="800">
+          <div style="font-size:10px;color:var(--muted);margin-top:4px;">New players admitted into the game per second. Lower = gentler ramp. 800 ≈ 20,000 players in ~25 s.</div>
+        </div>
         <div class="stats">
           <span><b id="nOnline">0</b>online now</span>
           <span><b id="nActive">0</b>active tiles</span>
@@ -234,11 +239,6 @@
         <label>Min coverage — <span id="covVal">60%</span></label>
         <input type="range" id="covSlider" min="0" max="0.9" step="0.05" value="0.6">
         <div style="font-size:10px;color:var(--muted);margin-top:4px;">0 = off. Player must cover at least this much of the tile's ink to submit — blocks tags/doodles that ignore the shape. Works even when similarity is off.</div>
-      </div>
-      <div style="margin-top:12px;">
-        <label>Admit rate — <span id="admitRateVal">200/s</span></label>
-        <input type="range" id="admitRateSlider" min="10" max="1000" step="10" value="500">
-        <div style="font-size:10px;color:var(--muted);margin-top:4px;">New players admitted per second. Lower = smoother submission spread. 200 = 20,000 players onboarded over ~100s.</div>
       </div>
       <div style="margin-top:12px;">
         <label>Rate limit — <span id="rateLimitVal">10s</span></label>
