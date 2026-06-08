@@ -423,7 +423,7 @@ function connect() {
       if (m.viewMode) setViewCtrl(m.viewMode);
       if (m.viewSidebarWidth) setSidebarWidthUI(m.viewSidebarWidth);
       if (m.viewDelay !== undefined) {
-        document.getElementById('delaySlider').value = m.viewDelay;
+        if (!_sliderDragging) document.getElementById('delaySlider').value = m.viewDelay;
         document.getElementById('delayVal').textContent = m.viewDelay === 0 ? 'instant' : m.viewDelay + 's';
       }
       updateQueueUI(m.admitQueueSize || 0);
@@ -443,7 +443,7 @@ function connect() {
       }
     }
     else if (m.type === 'view-delay') {
-      document.getElementById('delaySlider').value = m.delay;
+      if (!_sliderDragging) document.getElementById('delaySlider').value = m.delay;
       document.getElementById('delayVal').textContent = m.delay === 0 ? 'instant' : m.delay + 's';
     }
     else if (m.type === 'view-mode') { setViewCtrl(m.mode); }
@@ -643,6 +643,14 @@ document.getElementById('resumeBtn').addEventListener('click', async () => {
 });
 
 // ── colors ────────────────────────────────────────────────────────────────────
+// While the user drags a slider, each pixel POSTs /api/config, which the server
+// echoes back to all admins. Without this guard that echo would set the slider's
+// value mid-drag and fight the cursor (the "slider jumps left↔right" bug).
+let _sliderDragging = false;
+document.addEventListener('pointerdown',  e => { if (e.target && e.target.type === 'range') _sliderDragging = true; });
+document.addEventListener('pointerup',    () => { _sliderDragging = false; });
+document.addEventListener('pointercancel',() => { _sliderDragging = false; });
+
 function applyConfigUI(cfg) {
   if (cfg.defaultPieces !== undefined) document.getElementById('pieces').value = cfg.defaultPieces;
   if (cfg.defaultIncludeSolidBlack !== undefined) document.getElementById('includeSolid').checked = !!cfg.defaultIncludeSolidBlack;
@@ -652,6 +660,7 @@ function applyConfigUI(cfg) {
   if (cfg.paperColor)    document.getElementById('cPaper').value = cfg.paperColor;
   if (cfg.btnClearColor) document.getElementById('cClear').value = cfg.btnClearColor;
   if (cfg.btnNextColor)  document.getElementById('cNext').value  = cfg.btnNextColor;
+  if (!_sliderDragging) {  // skip while a slider is being dragged — the config echo would yank it
   if (cfg.similarityThreshold !== undefined) {
     document.getElementById('simSlider').value = cfg.similarityThreshold;
     document.getElementById('simVal').textContent = cfg.similarityThreshold === 0 ? 'off' : Math.round(cfg.similarityThreshold * 100) + '%';
@@ -671,6 +680,7 @@ function applyConfigUI(cfg) {
   if (cfg.rateLimit !== undefined) {
     document.getElementById('rateLimitSlider').value = cfg.rateLimit;
     document.getElementById('rateLimitVal').textContent = cfg.rateLimit === 0 ? 'off' : cfg.rateLimit + 's';
+  }
   }
   if (cfg.ghostMode !== undefined) setGhostModeUI(cfg.ghostMode);
   if (cfg.sendColor)   document.getElementById('cSend').value   = cfg.sendColor;
