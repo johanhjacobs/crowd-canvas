@@ -408,19 +408,19 @@ function paintQuote() {
   const spans = ('“' + q.text + '”').split(' ').map((w, idx) => {
     const s = document.createElement('span');
     s.textContent = (idx ? ' ' : '') + w;
-    s.style.cssText = 'opacity:0;transition:opacity .18s';
+    s.style.cssText = 'opacity:0;transition:opacity .3s';
     tEl.appendChild(s);
     return s;
   });
   let i = 0;
-  quoteTimer = setInterval(() => {          // reveal ~5 words/sec (200 ms each), in place
+  quoteTimer = setInterval(() => {          // reveal ~2.5 words/sec (400 ms each), in place
     if (i >= spans.length) {
       clearInterval(quoteTimer); quoteTimer = null;
       if (q.author) { aEl.textContent = '— ' + q.author; aEl.style.opacity = '0.5'; } // fade author in
       return;
     }
     spans[i++].style.opacity = '1';
-  }, 200);
+  }, 400);
 }
 
 // One screen for every "waiting for a tile" moment: pre-game, governor queue,
