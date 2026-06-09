@@ -93,7 +93,12 @@ const renderPool = new RenderWorkerPool(
 );
 console.log(`[render] ${RENDER_WORKERS} render worker(s) started`);
 
-const HOT_QUEUE_SOFT_LIMIT = 400;
+// Backpressure threshold: send 'wait' / pause admission only when the render
+// queue is genuinely deep. 400 was too twitchy — burst input (a synced storm)
+// briefly spikes `pending` over it even though the 4-worker pool drains in <1s
+// (submit latency stays single-digit ms), so players saw "Almost there" on every
+// burst. Raised so transient bursts are absorbed; the pool catches up.
+const HOT_QUEUE_SOFT_LIMIT = 1500;
 
 // ── session-level render tracking ─────────────────────────────────────────────
 let sessionEpoch = 0;
