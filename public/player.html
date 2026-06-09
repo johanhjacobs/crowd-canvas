@@ -400,18 +400,26 @@ function paintQuote() {
   const tEl = document.getElementById('quoteText'), aEl = document.getElementById('quoteAuthor');
   if (!tEl) return;
   clearInterval(quoteTimer); quoteTimer = null;
-  tEl.textContent = ''; aEl.textContent = ''; aEl.style.opacity = '0';
+  tEl.innerHTML = ''; aEl.textContent = ''; aEl.style.opacity = '0';
   if (startedDrawing || !quotes.length) return; // quotes only before the first piece, not mid-game
   const q = quotes[Math.floor(Math.random() * quotes.length)];
-  const words = ('“' + q.text + '”').split(' ');
+  // Lay out every word now (so the text never reflows/shifts), each hidden — then
+  // fade them in one at a time, in place.
+  const spans = ('“' + q.text + '”').split(' ').map((w, idx) => {
+    const s = document.createElement('span');
+    s.textContent = (idx ? ' ' : '') + w;
+    s.style.cssText = 'opacity:0;transition:opacity .18s';
+    tEl.appendChild(s);
+    return s;
+  });
   let i = 0;
-  quoteTimer = setInterval(() => {          // reveal ~5 words/sec (200 ms each)
-    if (i >= words.length) {
+  quoteTimer = setInterval(() => {          // reveal ~5 words/sec (200 ms each), in place
+    if (i >= spans.length) {
       clearInterval(quoteTimer); quoteTimer = null;
       if (q.author) { aEl.textContent = '— ' + q.author; aEl.style.opacity = '0.5'; } // fade author in
       return;
     }
-    tEl.textContent += (i ? ' ' : '') + words[i++];
+    spans[i++].style.opacity = '1';
   }, 200);
 }
 
