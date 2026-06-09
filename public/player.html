@@ -413,14 +413,14 @@ function paintQuote() {
     return s;
   });
   let i = 0;
-  quoteTimer = setInterval(() => {          // reveal ~2.5 words/sec (400 ms each), in place
+  quoteTimer = setInterval(() => {          // reveal ~3.3 words/sec (300 ms each), in place
     if (i >= spans.length) {
       clearInterval(quoteTimer); quoteTimer = null;
       if (q.author) { aEl.textContent = '— ' + q.author; aEl.style.opacity = '0.5'; } // fade author in
       return;
     }
     spans[i++].style.opacity = '1';
-  }, 400);
+  }, 300);
 }
 
 // One screen for every "waiting for a tile" moment: pre-game, governor queue,
