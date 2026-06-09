@@ -17,7 +17,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 sharp.concurrency(1);
 sharp.cache(false);
 
-const RENDER_WORKERS = Math.max(1, Math.min(4, (os.availableParallelism?.() || 2) - 1));
+// Each submission costs one Sharp render (~tens of ms). The render pool was the
+// throughput ceiling at scale: hard-capped at 4 workers it tops out ~160 renders/s,
+// so a high submit rate backs up the queue → isHotPathBusy → 'wait' storms. Scale
+// with the box instead, leaving ~2 cores for the main thread + libuv. Overridable
+// via RENDER_WORKERS env.
+const RENDER_WORKERS = (() => {
+  const env = parseInt(process.env.RENDER_WORKERS, 10);
+  if (Number.isInteger(env) && env > 0) return env;
+  const cores = os.availableParallelism?.() || 4;
+  return Math.max(2, Math.min(12, cores - 2));
+})();
 const SUBMISSION_DB_FLUSH_MS = 80;
 
 class RenderWorkerPool {
