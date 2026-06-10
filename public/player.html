@@ -468,7 +468,7 @@ function revealTile(m) {
   startedDrawing = true;  // from here on, wait screens are quote-free (mid-game)
   similarityRetries = 0; // fresh tile — reset retry counter
   tileReceivedAt = Date.now();
-  tileId = m.tileId; setBusy(false); clearDraw(); ghostClear(); updateTileUI();
+  tileId = m.tileId; clearDraw(); ghostClear();
 
   // Solid black tile: warn the player to fill it completely, then let them draw normally.
   const hint = document.getElementById('hint');
@@ -478,12 +478,25 @@ function revealTile(m) {
       ? '✏️ Trace the image on the canvas below'
       : '✏️ Copy this image on the canvas below';
 
+  // Keep the "waiting for next tile" overlay up until the watermark image is
+  // actually painted (its download is itself slow on 5G) — not just until the
+  // 'tile' message lands. A timeout still unlocks so a hung image never sticks.
+  let settled = false;
+  const finish = () => {
+    if (settled) return; settled = true;
+    clearTimeout(revealFallback);
+    setBusy(false);
+    updateTileUI(); // hasTile is true now → hides the loading overlay
+  };
   const img = new Image();
   img.onload = () => {
     curRef = img; drawRef(img);
     document.getElementById('ghost').style.backgroundImage = `url(${img.src})`;
     if (ghostMode === 'immediate') setGhostOpacity(0.40);
+    finish();
   };
+  img.onerror = finish;
+  const revealFallback = setTimeout(finish, 6000);
   img.src = m.refUrl + '?t=' + Date.now();
 }
 function setBootMsg(t) { const el = document.getElementById('bootMsg'); if (el) el.textContent = t; }
@@ -958,15 +971,16 @@ document.getElementById('submitBtn').addEventListener('click', () => {
     ws.send(JSON.stringify({ type: 'submit', tileId, png: buildSubmitCanvas().toDataURL('image/png') }));
     tileId = null; awaitingTile = true;
     clearDraw(); ghostClear();
+    // Show the in-card loading overlay right under the green flash, so when the
+    // flash fades on a slow link there's a "waiting for next tile" message
+    // instead of a blank white card. revealTile keeps it up until the watermark
+    // image is actually painted.
+    document.getElementById('retrievingOverlay').textContent = '⟳ Waiting for next tile…';
+    updateTileUI();
   }
 
   showResultFlash(result, () => {
-    if (success) {
-      // If the next tile hasn't arrived by the time the flash fades, show the
-      // brief loading screen rather than a blank/old canvas.
-      if (awaitingTile) showWait('Loading your piece…', 'Sharpen your pencil!', 0);
-      return;
-    }
+    if (success) return; // overlay already shows the loading state until the tile lands
     if (result.label === 'partial') {
       ghostFail();
       setBusy(false);
