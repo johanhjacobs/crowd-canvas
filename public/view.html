@@ -226,6 +226,28 @@ function setSidebar(on) {
 }
 
 
+// ── coverage % counter ────────────────────────────────────────────────────────
+// Smoothly count the displayed % from its current value up (or down) to the
+// latest target, so the reveal reads as a rising number rather than a jump.
+let _pctShown = 0, _pctRaf = null;
+function tweenPct(target) {
+  target = Math.max(0, Math.min(100, Math.round(target)));
+  const el = document.getElementById('stat-pct');
+  const from = _pctShown, dist = target - from;
+  if (dist === 0) { el.textContent = target + '%'; return; }
+  if (_pctRaf) cancelAnimationFrame(_pctRaf);
+  const start = performance.now(), dur = 900;
+  const step = now => {
+    const p = Math.min(1, (now - start) / dur);
+    const eased = 1 - Math.pow(1 - p, 3); // easeOutCubic
+    _pctShown = from + dist * eased;
+    el.textContent = Math.round(_pctShown) + '%';
+    if (p < 1) { _pctRaf = requestAnimationFrame(step); }
+    else { _pctShown = target; _pctRaf = null; }
+  };
+  _pctRaf = requestAnimationFrame(step);
+}
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 let ws;
 function connect() {
@@ -235,6 +257,8 @@ function connect() {
     const m = JSON.parse(ev.data);
     if (m.type === 'init' || m.type === 'reset') {
       tiles.clear();
+      if (_pctRaf) { cancelAnimationFrame(_pctRaf); _pctRaf = null; }
+      _pctShown = 0; document.getElementById('stat-pct').textContent = '0%';
       lastSeedImg = null; // new session — don't restore old mosaic
       applyViewColors(m.bgColor || '#000000', m.textColor || '#ffffff', m.tileColor || '#e0e0e0', m.inkColor || '#000000', m.paperColor || '#ffffff', { reseed: false });
       if (m.sidebarWidth) sidebar.style.width = m.sidebarWidth + '%';
@@ -265,7 +289,7 @@ function connect() {
     else if (m.type === 'view-sidebar-width') { sidebar.style.width = m.width + '%'; resize(); }
     else if (m.type === 'stats') {
       document.getElementById('stat-players').textContent = m.players ?? '—';
-      document.getElementById('stat-pct').textContent     = (m.coverage ?? 0) + '%';
+      tweenPct(m.coverage ?? 0);
     }
   };
   ws.onclose = () => setTimeout(connect, 2000);

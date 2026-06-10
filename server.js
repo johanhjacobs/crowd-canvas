@@ -1574,6 +1574,9 @@ async function autoFillAndFinish(durationMs = 10000) {
         broadcastAdmins({ type: 'tile-update', tileId: id, x: t.x, y: t.y, sz: t.sz, png: dataUrl, subs: redundancy });
         enqueueViewUpdate({ type: 'tile-update', tileId: id, x: t.x, y: t.y, sz: t.sz, version: afVersion });
       }
+      // Push the climbing coverage to the big screen so its % counts up with the
+      // reveal instead of jumping to 100% at the end (throttled in broadcastStats).
+      broadcastStats();
     }, Math.round(b * batchInterval));
     autoFillTimers.add(timer);
   }
