@@ -1497,6 +1497,7 @@ async function finishSession() {
   // Tell everyone immediately — don't make 20k phones wait 30 s for a 4K image build.
   broadcastAdmins({ type: 'done' });
   broadcastPlayers({ type: 'done' });
+  broadcastViews({ type: 'reveal-end' }); // close any reveal — view finishes its % once paints drain
   broadcastStats();
 
   // Drain pending renders first, then build final images.
@@ -1541,6 +1542,13 @@ async function autoFillAndFinish(durationMs = 10000) {
     const j = Math.floor(Math.random() * (i + 1));
     [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
   }
+
+  // Tell the big screen a reveal is starting. Only never-submitted tiles are
+  // actually painted on the view (top-ups keep their existing drawing), so that
+  // count is what the view's % should climb across — from the current coverage
+  // up to 100% — paced by the tiles it genuinely paints, not the server count.
+  const revealTotal = remaining.reduce((n, { id }) => n + ((state.submissionCounts.get(id) || 0) === 0 ? 1 : 0), 0);
+  broadcastViews({ type: 'reveal-start', total: revealTotal, baseline: completionStats().coverage });
 
   // Process in small batches: load each ref image only when its batch fires,
   // so we never hold thousands of image buffers in memory at once.
