@@ -391,10 +391,10 @@ let firstTile = true;          // first tile of this connection gets the deliber
 let pendingTile = null;        // tile held behind the load screen during the delay
 let startedDrawing = false;    // once the first piece is shown, no more quotes (only at the start)
 
-// A reload/first-join must never beat the normal in-game pace, even when the
-// server is idle: total time from connect to first tile is held to ≥ this.
-// `rateLimit` (seconds between pieces, set from config below) is reused here.
-function deliberateMs() { return Math.max(5000, (rateLimit || 0) * 1000); }
+// Pre-game hold before a player's first tile, driven directly by the configured
+// rate limit (seconds): 0 = play immediately (no load screen), otherwise hold the
+// first tile that long. `rateLimit` (set from config below) is reused here.
+function deliberateMs() { return (rateLimit || 0) * 1000; }
 
 function paintQuote() {
   const tEl = document.getElementById('quoteText'), aEl = document.getElementById('quoteAuthor');
