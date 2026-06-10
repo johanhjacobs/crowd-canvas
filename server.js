@@ -1884,11 +1884,17 @@ wss.on('connection', (ws, req) => {
         resetToken: state.tileResetTokens.get(m.tileId) || 0,
       });
 
+      let finished = false;
       if (!state.done) {
         const redundancy = state.redundancy || 3;
         const complete = [...state.submissionCounts.values()].every(n => n >= redundancy);
-        if (complete) finishSession().catch(console.error);
+        if (complete) { finishSession().catch(console.error); finished = true; }
       }
+
+      // Push the next tile immediately instead of waiting for the client to send
+      // 'next' — saves a full round-trip on slow links. Rate-limited players
+      // request their own next tile after the in-card countdown (showRateLimit).
+      if (rateLimitWait === 0 && !finished && !state.done) give();
     }
   });
   ws.on('close', () => {

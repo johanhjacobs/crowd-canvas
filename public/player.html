@@ -204,6 +204,7 @@ let tileReceivedAt = 0;
 let similarityRetries = 0; // resets to 0 on each new tile
 let dpr = 1, tileSide = 0, drawSide = 0, bleedPx = 0;
 let tileId = null, drawing = false, pts = [];
+let awaitingTile = false; // submitted, waiting for the server to push the next tile
 
 let rateLimitTimer = null;
 
@@ -463,6 +464,7 @@ function hideWait() {
 // can call it after the countdown).
 function revealTile(m) {
   hideWait();
+  awaitingTile = false;
   startedDrawing = true;  // from here on, wait screens are quote-free (mid-game)
   similarityRetries = 0; // fresh tile — reset retry counter
   tileReceivedAt = Date.now();
@@ -602,14 +604,11 @@ function connect() {
       showWait('Almost there!', 'Finding you a piece to draw…<br>Keep this screen open.', 0);
       setTimeout(() => ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: 'next' })), 2000);
     } else if (m.type === 'accepted') {
-      // Submission accepted — between-piece countdown runs IN the tile card
-      // (showRateLimit), not on the full-screen load screen.
+      // Submission accepted. If rate-limited, the between-piece countdown runs IN
+      // the tile card (showRateLimit) and requests 'next' when it ends. Otherwise
+      // the server pushes the next tile straight away — we just wait for 'tile'.
       if (m.rateLimitSeconds > 0) {
         showRateLimit(m.rateLimitSeconds);
-      } else {
-        setTimeout(() => {
-          if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
-        }, 900);
       }
     } else if (m.type === 'rejected') {
       // Server rejected (rate limit bypass attempt) — just unlock so player can retry
@@ -949,31 +948,46 @@ document.getElementById('submitBtn').addEventListener('click', () => {
     setBusy(false);
     return;
   }
+  const success = result.label !== 'partial' && result.ok;
+
+  if (success) {
+    // Submit immediately so the network round-trip overlaps the green flash
+    // instead of starting ~1s after it. Clear the old piece right away so it
+    // can't flash back from under the fading flash; the server pushes the next
+    // tile on its own (no extra 'next' round-trip on a slow link).
+    ws.send(JSON.stringify({ type: 'submit', tileId, png: buildSubmitCanvas().toDataURL('image/png') }));
+    tileId = null; awaitingTile = true;
+    clearDraw(); ghostClear();
+  }
+
   showResultFlash(result, () => {
+    if (success) {
+      // If the next tile hasn't arrived by the time the flash fades, show the
+      // brief loading screen rather than a blank/old canvas.
+      if (awaitingTile) showWait('Loading your piece…', 'Sharpen your pencil!', 0);
+      return;
+    }
     if (result.label === 'partial') {
       ghostFail();
       setBusy(false);
       return;
     }
-    if (!result.ok) {
-      similarityRetries++;
-      if (similarityRetries <= 1) {
-        // first failure: always free retry, server will rate-limit if they submit too fast
-        clearDraw();
-        ghostHide();
-        ghostFail();
-        setBusy(false);
-      } else {
-        // second failure: move to next tile, apply rate limit if needed
-        if (!maybeShowRateLimit()) {
-          setTimeout(() => {
-            if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
-          }, 1800);
-        }
+    // result is a similarity failure here
+    similarityRetries++;
+    if (similarityRetries <= 1) {
+      // first failure: always free retry, server will rate-limit if they submit too fast
+      clearDraw();
+      ghostHide();
+      ghostFail();
+      setBusy(false);
+    } else {
+      // second failure: move to next tile, apply rate limit if needed
+      if (!maybeShowRateLimit()) {
+        setTimeout(() => {
+          if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'next' }));
+        }, 1800);
       }
-      return;
     }
-    ws.send(JSON.stringify({ type: 'submit', tileId, png: buildSubmitCanvas().toDataURL('image/png') }));
   });
 });
 
