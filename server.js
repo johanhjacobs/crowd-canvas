@@ -1059,7 +1059,7 @@ app.post('/api/session/auto-finish', async (req, res) => {
   if (!state) return res.status(404).json({ error: 'no session' });
   if (state.done) return res.status(400).json({ error: 'already done' });
   if (state.autoFilling) return res.status(400).json({ error: 'auto-fill already running' });
-  const duration = Math.max(1000, Math.min(60000, parseInt(req.body?.duration, 10) || 10000));
+  const duration = Math.max(1000, Math.min(60000, parseInt(req.body?.duration, 10) || 5000));
   const unfilled = [...state.tiles.keys()].filter(id => (state.submissionCounts.get(id) || 0) === 0).length;
   autoFillAndFinish(duration).catch(console.error);
   res.json({ ok: true, filling: unfilled, duration });
@@ -1387,12 +1387,13 @@ app.get('/api/export-thumb.png', async (_, res) => {
 
 function adminState() {
   if (!state) return { active: false, viewPath: VIEW_PATH };
-  const subs = db.prepare('SELECT tile, COUNT(*) n FROM submissions GROUP BY tile').all();
-  const cnt = new Map(subs.map(s => [s.tile, s.n]));
+  // Use the live in-memory counters, not a fresh DB query: these include
+  // auto-filled tiles (which never write submission rows), so the post-"done"
+  // re-fetch agrees with the counts the admin saw climb during the fill.
   return {
     active: true, done: state.done, size: state.size, redundancy: state.redundancy, imgW: state.imgW, imgH: state.imgH,
     waitingCount: waiting.size, admitQueueSize: waiting.size, viewMode, viewDelay, viewSidebarWidth, viewPath: VIEW_PATH,
-    tiles: [...state.tiles.values()].map(t => ({ id: t.id, x: t.x, y: t.y, sz: t.sz, subs: cnt.get(t.id) || 0 })),
+    tiles: [...state.tiles.values()].map(t => ({ id: t.id, x: t.x, y: t.y, sz: t.sz, subs: state.submissionCounts.get(t.id) || 0 })),
     blanks: state.blanks,
   };
 }
@@ -1518,11 +1519,15 @@ async function finishSession() {
 async function autoFillAndFinish(durationMs = 10000) {
   if (!state || state.done || state.autoFilling) return;
   state.autoFilling = true;
+  const redundancy = state.redundancy || 3;
 
-  // Only fill tiles that have never been submitted
+  // Every tile that isn't yet complete. Tiles never submitted get the reference
+  // image painted in; partially-submitted tiles keep their drawing and are only
+  // topped up. Either way the count is driven to `redundancy` so progress
+  // (counted/required) climbs all the way to 100%.
   const remaining = [];
   for (const [id, t] of state.tiles) {
-    if ((state.submissionCounts.get(id) || 0) === 0) remaining.push({ id, t });
+    if ((state.submissionCounts.get(id) || 0) < redundancy) remaining.push({ id, t });
   }
 
   if (!remaining.length) {
@@ -1549,17 +1554,24 @@ async function autoFillAndFinish(durationMs = 10000) {
       if (!state) return;
       const slice = remaining.slice(b * BATCH, (b + 1) * BATCH);
       for (const { id, t } of slice) {
+        const hadDrawing = (state.submissionCounts.get(id) || 0) > 0;
+        state.submissionCounts.set(id, redundancy);
+        const afVersion = (state.tileVersions.get(id) || 0) + 1;
+        state.tileVersions.set(id, afVersion);
+        if (hadDrawing) {
+          // Already has a real drawing — keep the image, just bump the count so
+          // progress reaches 100%. No PNG payload: the admin/view keep what they have.
+          broadcastAdmins({ type: 'tile-update', tileId: id, x: t.x, y: t.y, sz: t.sz, subs: redundancy });
+          continue;
+        }
         let buf;
         try { buf = await fs.promises.readFile(path.join(REFS, id + '.png')); }
         catch { continue; }
         const dataUrl = 'data:image/png;base64,' + buf.toString('base64');
         state.blendedPngs.set(id, buf);
         state.livePngs.set(id, buf);
-        state.submissionCounts.set(id, 1);
         state.autoFilledTiles.add(id);
-        const afVersion = (state.tileVersions.get(id) || 0) + 1;
-        state.tileVersions.set(id, afVersion);
-        broadcastAdmins({ type: 'tile-update', tileId: id, x: t.x, y: t.y, sz: t.sz, png: dataUrl, subs: 1 });
+        broadcastAdmins({ type: 'tile-update', tileId: id, x: t.x, y: t.y, sz: t.sz, png: dataUrl, subs: redundancy });
         enqueueViewUpdate({ type: 'tile-update', tileId: id, x: t.x, y: t.y, sz: t.sz, version: afVersion });
       }
     }, Math.round(b * batchInterval));

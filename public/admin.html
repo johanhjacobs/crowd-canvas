@@ -518,7 +518,7 @@ function connect() {
         if (!wasDrawn && t.subs > 0) drawn++;
         else if (wasDrawn && t.subs === 0) drawn--;
       }
-      paintTile(m.x, m.y, m.sz, m.png);
+      if (m.png) paintTile(m.x, m.y, m.sz, m.png); // top-up updates carry no image
       updateStats();
     }
   };
