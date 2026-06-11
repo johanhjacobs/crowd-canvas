@@ -231,24 +231,20 @@ function setSidebar(on) {
 // ── coverage % counter ────────────────────────────────────────────────────────
 // Smoothly count the displayed % from its current value up (or down) to the
 // latest target, so the reveal reads as a rising number rather than a jump.
-let _pctShown = 0, _pctRaf = null;
+let _pctShown = 0;
+let _pctRaf = null;
+
 function tweenPct(target) {
   target = Math.max(0, Math.min(100, Math.round(target)));
+
+  _pctShown = target;
+
   const el = document.getElementById('stat-pct');
-  const from = _pctShown, dist = target - from;
-  if (dist === 0) { el.textContent = target + '%'; return; }
-  if (_pctRaf) cancelAnimationFrame(_pctRaf);
-  const start = performance.now(), dur = 900;
-  const step = now => {
-    const p = Math.min(1, (now - start) / dur);
-    const eased = 1 - Math.pow(1 - p, 3); // easeOutCubic
-    _pctShown = from + dist * eased;
-    el.textContent = Math.round(_pctShown) + '%';
-    if (p < 1) { _pctRaf = requestAnimationFrame(step); }
-    else { _pctShown = target; _pctRaf = null; }
-  };
-  _pctRaf = requestAnimationFrame(step);
+  if (el) {
+    el.textContent = target + '%';
+  }
 }
+
 
 // ── reveal progress ───────────────────────────────────────────────────────────
 // During "Finish & fill remaining" the server bumps every tile's count at once,
